@@ -10,12 +10,17 @@
 #include <math.h>
 #include "internal.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 struct ssync_ctx_s {
 	ssync_t* ssync;
 	ssync_mode_t mode;
 
 	ssync_obj_schema_t* schema;
 
+	ssync_net_id_t obj_id;
 	ssync_obj_t* obj;
 	int prop_group_index;
 	int prop_index;
@@ -41,7 +46,7 @@ struct ssync_s {
 	ssync_snapshot_pool_t snapshot_pool;
 	ssync_snapshot_pool_t outgoing_archive;
 	ssync_snapshot_pool_t incoming_archive;
-	ssync_snapshot_t* last_snapshot;
+	ssync_snapshot_t* last_acked_snapshot;
 	void* outgoing_packet_buf;
 	void* record_buf;
 
@@ -104,6 +109,15 @@ ssync_write_schema_impl(ssync_sync_fn_t sync, void* userdata, bsv_ctx_t* ctx) {
 	bsv_ssync_obj_schema(ctx, &schema);
 }
 
+static void
+ssync_reflect_add_prop(ssync_ctx_t* ctx, ssync_prop_type_t type, int precision, ssync_prop_flags_t flags) {
+	ctx->schema->prop_groups[ctx->prop_group_index - 1].props[ctx->prop_index] = (ssync_prop_schema_t){
+		.type = type,
+		.precision = precision,
+		.flags = flags,
+	};
+}
+
 // }}}
 
 // Snapshot {{{
@@ -114,6 +128,7 @@ ssync_write_obj(ssync_t* ssync, ssync_net_id_t id, ssync_obj_t* out) {
 		.mode = SSYNC_MODE_WRITE,
 		.ssync = ssync,
 		.obj = out,
+		.obj_id = id,
 	};
 	ssync->config.sync(ssync->config.userdata, &ctx, id);
 }
@@ -233,7 +248,7 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 	ssync_msg_header_t header = { 0 };
 	if (bsv_ssync_msg_header(&ctx, &header) != BSV_OK) { return; }
 
-	// TODO: maybe drop to 16 bits and do some wrap around math
+	// TODO: Partially accept either current_tick or ack
 	if (header.current_tick < ssync->last_server_header.current_tick) {
 		return;  // Out of order message
 	}
@@ -298,7 +313,12 @@ ssync_update(ssync_t* ssync, double dt) {
 
 		bool has_space = true;
 		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_tick, ssync);
-		const ssync_snapshot_t* base_snapshot = ssync->last_snapshot;
+		const ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot;
+		ssync_snapshot_t* tmp_snapshot = NULL;
+		if (base_snapshot == NULL) {
+			base_snapshot = tmp_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, 0, ssync);
+		}
+
 		bhash_index_t num_local_objects = bhash_len(&ssync->local_objects);
 
 		// Created objects since the last snapshot
@@ -419,6 +439,10 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync->config.send_msg(ssync->config.userdata, msg, false);
 
 		ssync_archive_snapshot(&ssync->outgoing_archive, snapshot);
+
+		if (tmp_snapshot != NULL) {
+			ssync_release_snapshot(&ssync->snapshot_pool, tmp_snapshot);
+		}
 	}
 }
 
@@ -462,45 +486,73 @@ ssync_mode(ssync_ctx_t* ctx) {
 }
 
 bool
-ssync_prop_group(ssync_ctx_t* ctx, ssync_local_id_t id) {
+ssync_prop_group(ssync_ctx_t* ctx, ssync_local_id_t prop_group_id) {
+	ssync_t* ssync = ctx->ssync;
 	switch (ctx->mode) {
 		case SSYNC_MODE_REFLECT:
 			ssync_finalize_prop_group(ctx);
 			++ctx->prop_group_index;
 			ctx->prop_index = 0;
 			return true;
+		case SSYNC_MODE_WRITE: {
+			bool has_prop_group = ssync->config.has_prop_group(
+				ssync->config.userdata, ctx->obj_id, prop_group_id
+			);
+			if (has_prop_group) {
+				ctx->obj->prop_group_mask |= 1 << ctx->prop_group_index;
+			}
+			ctx->prop_group_index += 1;
+			return has_prop_group;
+		}
 		default:
 			return false;
 	}
 }
 
-static void
-ssync_reflect_add_prop(ssync_ctx_t* ctx, ssync_prop_type_t type, int precision, ssync_prop_flags_t flags) {
-	ctx->schema->prop_groups[ctx->prop_group_index - 1].props[ctx->prop_index] = (ssync_prop_schema_t){
-		.type = type,
-		.precision = precision,
-		.flags = flags,
-	};
-}
-
 bool
 ssync_prop_int(ssync_ctx_t* ctx, int64_t* value, ssync_prop_flags_t flags) {
+	ssync_t* ssync = ctx->ssync;
 	switch (ctx->mode) {
 		case SSYNC_MODE_REFLECT:
 			ssync_reflect_add_prop(ctx, SSYNC_PROP_TYPE_INT, 0, flags);
 			++ctx->prop_index;
 			return false;
+		case SSYNC_MODE_WRITE:
+			barray_push(ctx->obj->props, *value, ssync);
+			return false;
 		default:
 			return false;
 	}
 }
 
+static uint16_t
+ssync_rad_to_u16(float radians) {
+	// Normalize to [0, 2π) range
+	float normalized = fmodf(radians, 2.f * M_PI);
+	if (normalized < 0.f) {
+		normalized += 2.f * M_PI;
+	}
+
+	// Map [0, 2 * M_PI) to [0, 65536)
+	return (uint16_t)(normalized * (65536.f) / (2.f * M_PI));
+}
+
 bool
 ssync_prop_float(ssync_ctx_t* ctx, float* value, int precision, ssync_prop_flags_t flags) {
+	ssync_t* ssync = ctx->ssync;
 	switch (ctx->mode) {
 		case SSYNC_MODE_REFLECT:
 			ssync_reflect_add_prop(ctx, SSYNC_PROP_TYPE_FLOAT, precision, flags);
 			++ctx->prop_index;
+			return false;
+		case SSYNC_MODE_WRITE:
+			if (flags & SSYNC_PROP_ROTATION) {
+				uint16_t fixed_point_angle = ssync_rad_to_u16(*value);
+				barray_push(ctx->obj->props, (int64_t)fixed_point_angle, ssync);
+			} else {
+				int64_t fixed_point = (int64_t)((*value) * (float)(1 << precision));
+				barray_push(ctx->obj->props, fixed_point, ssync);
+			}
 			return false;
 		default:
 			return false;
