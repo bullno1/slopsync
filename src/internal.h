@@ -1,3 +1,4 @@
+// vim: set foldmethod=marker foldlevel=0:
 #ifndef SLOPSYNC_INTERNAL_H
 #define SLOPSYNC_INTERNAL_H
 
@@ -74,16 +75,14 @@ typedef struct ssync_snapshot_s ssync_snapshot_t;
 
 struct ssync_snapshot_s {
 	ssync_snapshot_t* next;
+	ssync_tick_t tick;
 
 	BHASH_TABLE(ssync_net_id_t, ssync_obj_t) objects;
-	barray(ssync_obj_create_record_t) created_objects;
-	barray(ssync_obj_destroy_record_t) destroyed_objects;
 };
 
 typedef struct {
-	ssync_tick_t latest_tick;
-	BHASH_TABLE(ssync_tick_t, ssync_snapshot_t*) snapshots;
-} ssync_snapshot_archive_t;
+	ssync_snapshot_t* next;
+} ssync_snapshot_pool_t;
 
 typedef enum {
 	SSYNC_PROP_TYPE_INT,
@@ -122,6 +121,160 @@ typedef struct {
 	size_t count;
 } ssync_bsv_count_t;
 
+extern void*
+ssync_host_realloc(void* ptr, size_t size, void* ctx);
+
+// Object {{{
+
+static inline void
+ssync_cleanup_obj(ssync_obj_t* obj, void* memctx) {
+	barray_free(obj->props, memctx);
+	obj->props = NULL;
+}
+
+static inline void
+ssync_copy_obj(ssync_obj_t* dst, const ssync_obj_t* src, void* memctx) {
+	size_t num_props = barray_len(src->props);
+	barray_resize(dst->props, num_props, memctx);
+	memcpy(dst->props, src->props, num_props * sizeof(ssync_prop_t));
+}
+
+// }}}
+
+// Snapshot {{{
+
+static inline void
+ssync_reinit_snapshot(ssync_snapshot_t* snapshot, void* memctx) {
+	bhash_config_t config = bhash_config_default();
+	config.memctx = memctx;
+	config.removable = false;
+	bhash_reinit(&snapshot->objects, config);
+}
+
+static inline void
+ssync_reinit_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
+	for (ssync_snapshot_t* itr = pool->next; itr != NULL; itr = itr->next) {
+		ssync_reinit_snapshot(itr, memctx);
+	}
+}
+
+static inline void
+ssync_cleanup_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
+	for (ssync_snapshot_t* itr = pool->next; itr != NULL; itr = itr->next) {
+		for (bhash_index_t i = 0; i < bhash_len(&itr->objects); ++i) {
+			ssync_cleanup_obj(&itr->objects.values[i], memctx);
+		}
+		bhash_cleanup(&itr->objects);
+	}
+}
+
+static inline ssync_snapshot_t*
+ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_tick_t tick, void* memctx) {
+	ssync_snapshot_t* snapshot;
+	if (pool->next != NULL) {
+		snapshot = pool->next;
+		pool->next = snapshot->next;
+
+		for (bhash_index_t i = 0; i < bhash_len(&snapshot->objects); ++i) {
+			ssync_cleanup_obj(&snapshot->objects.values[i], memctx);
+		}
+		bhash_clear(&snapshot->objects);
+	} else {
+		snapshot = ssync_host_realloc(NULL, sizeof(ssync_snapshot_t), memctx);
+		*snapshot = (ssync_snapshot_t){ 0 };
+		ssync_reinit_snapshot(snapshot, memctx);
+	}
+
+	snapshot->tick = tick;
+	return snapshot;
+}
+
+static inline void
+ssync_release_snapshot(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) {
+	snapshot->next = pool->next;
+	pool->next = snapshot->next;
+}
+
+static inline bool
+ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapshot) {
+	ssync_snapshot_t** itr = &archive->next;
+
+	// Traverse the list to find the insertion point
+	while (*itr != NULL) {
+		if ((*itr)->tick == snapshot->tick) {
+			// Duplicate tick found, do not insert
+			return false;
+		}
+
+		if ((*itr)->tick < snapshot->tick) {
+			break;
+		}
+		itr = &(*itr)->next;
+	}
+
+	// Insert the snapshot
+	snapshot->next = *itr;
+	*itr = snapshot;
+	return true;
+}
+
+static inline void
+ssync_release_after(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) {
+    ssync_snapshot_t* itr = snapshot->next;
+    while (itr != NULL) {
+        ssync_snapshot_t* to_release = itr;
+        itr = itr->next;
+        ssync_release_snapshot(pool, to_release);
+    }
+    snapshot->next = NULL;
+}
+
+static inline ssync_snapshot_t*
+ssync_ack_snapshot(
+	ssync_snapshot_pool_t* archive,
+	ssync_snapshot_pool_t* pool,
+	ssync_tick_t tick
+) {
+	ssync_snapshot_t* itr = archive->next;
+	while (itr != NULL) {
+		if (itr->tick == tick) {
+			ssync_release_after(pool, itr);
+			return itr;
+		}
+
+		if (itr->tick < tick) {
+			// Since list is in descending order, no match exists
+			return NULL;
+		}
+
+		itr = itr->next;
+	}
+
+	return NULL;
+}
+
+static inline const ssync_snapshot_t*
+ssync_find_snapshot_pair(const ssync_snapshot_pool_t* archive, ssync_tick_t tick) {
+	const ssync_snapshot_t* itr = archive->next;
+
+	while (itr != NULL && itr->next != NULL) {
+		const ssync_snapshot_t* a = itr;
+		const ssync_snapshot_t* b = itr->next;
+
+		if (b->tick <= tick && tick < a->tick) {
+			return a;
+		}
+
+		itr = itr->next;
+	}
+
+	return NULL;
+}
+
+// }}}
+
+// bsv {{{
+
 bsv_in_t*
 ssync_init_bsv_in(ssync_bsv_in_t* bsv_in, bitstream_in_t* stream);
 
@@ -130,6 +283,10 @@ ssync_init_bsv_out(ssync_bsv_out_t* bsv_out, bitstream_out_t* stream);
 
 bsv_out_t*
 ssync_init_bsv_count(ssync_bsv_count_t* bsv_count);
+
+// }}}
+
+// Records {{{
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -457,5 +614,7 @@ ssync_write_obj_update(
 		if (previous_has_prop_group) { previous_props += num_props; }
 	}
 }
+
+// }}}
 
 #endif

@@ -38,6 +38,9 @@ struct ssync_s {
 	double logic_tick_interval;
 	double net_tick_interval;
 
+	ssync_snapshot_pool_t snapshot_pool;
+	ssync_snapshot_pool_t outgoing_archive;
+	ssync_snapshot_pool_t incoming_archive;
 	ssync_snapshot_t* last_snapshot;
 	void* outgoing_packet_buf;
 	void* record_buf;
@@ -48,10 +51,15 @@ struct ssync_s {
 
 // Allocator {{{
 
-static void*
-ssync_blib_realloc(void* ptr, size_t size, void* ctx) {
+void*
+ssync_host_realloc(void* ptr, size_t size, void* ctx) {
 	ssync_t* ssync = ctx;
 	return ssync->config.realloc(ssync->config.userdata, ptr, size);
+}
+
+static void*
+ssync_blib_realloc(void* ptr, size_t size, void* ctx) {
+	return ssync_host_realloc(ptr, size, ctx);
 }
 
 static void*
@@ -110,27 +118,6 @@ ssync_write_obj(ssync_t* ssync, ssync_net_id_t id, ssync_obj_t* out) {
 	ssync->config.sync(ssync->config.userdata, &ctx, id);
 }
 
-static ssync_snapshot_t*
-ssync_acquire_snapshot(ssync_t* ssync) {
-	return NULL;
-}
-
-/*static void*/
-/*ssync_release_snapshot(ssync_t* ssync, ssync_snapshot_t* snapshot) {*/
-/*}*/
-
-static void
-ssync_archive_snapshot(ssync_t* ssync, ssync_snapshot_t* snapshot) {
-}
-
-static void
-ssync_cleanup_obj(ssync_t* sync, ssync_obj_t* obj) {
-}
-
-static void
-ssync_copy_obj(ssync_t* sync, ssync_obj_t* dst, const ssync_obj_t* src) {
-}
-
 // }}}
 
 // Message records {{{
@@ -172,11 +159,28 @@ ssync_write_schema(ssync_sync_fn_t sync, void* userdata, void* out, size_t out_s
 	ssync_write_schema_impl(sync, userdata, &ctx);
 }
 
+static inline void
+ssync_do_reinit(ssync_t* ssync, const ssync_config_t* config) {
+	ssync->config = *config;
+
+	bhash_config_t hconfig = bhash_config_default();
+	hconfig.memctx = ssync;
+	bhash_reinit(&ssync->local_objects, hconfig);
+	bhash_reinit(&ssync->remote_objects, hconfig);
+
+	ssync_reinit_snapshot_pool(&ssync->snapshot_pool, ssync);
+	ssync_reinit_snapshot_pool(&ssync->incoming_archive, ssync);
+	ssync_reinit_snapshot_pool(&ssync->outgoing_archive, ssync);
+
+	ssync->outgoing_packet_buf = ssync_realloc(config, ssync->outgoing_packet_buf, config->max_message_size);
+	ssync->record_buf = ssync_realloc(config, ssync->record_buf, config->max_message_size);
+}
+
 ssync_t*
 ssync_init(const ssync_config_t* config) {
 	ssync_t* ssync = ssync_malloc(config, sizeof(ssync_t));
 	*ssync = (ssync_t){ 0 };
-	ssync_reinit(&ssync, config);
+	ssync_do_reinit(ssync, config);
 	return ssync;
 }
 
@@ -186,25 +190,23 @@ ssync_reinit(ssync_t** ssync_ptr, const ssync_config_t* config) {
 	if (ssync == NULL) {
 		ssync = ssync_init(config);
 		*ssync_ptr = ssync;
-		return;
+	} else {
+		ssync_do_reinit(*ssync_ptr, config);
 	}
-	ssync->config = *config;
-
-	bhash_config_t hconfig = bhash_config_default();
-	hconfig.memctx = ssync;
-	bhash_reinit(&ssync->local_objects, hconfig);
-	bhash_reinit(&ssync->remote_objects, hconfig);
-
-	ssync_realloc(config, ssync->outgoing_packet_buf, config->max_message_size);
-	ssync_realloc(config, ssync->record_buf, config->max_message_size);
 }
 
 void
 ssync_cleanup(ssync_t* ssync) {
 	bhash_cleanup(&ssync->local_objects);
 	bhash_cleanup(&ssync->remote_objects);
+
+	ssync_cleanup_snapshot_pool(&ssync->snapshot_pool, ssync);
+	ssync_cleanup_snapshot_pool(&ssync->incoming_archive, ssync);
+	ssync_cleanup_snapshot_pool(&ssync->outgoing_archive, ssync);
+
 	ssync_free(&ssync->config, ssync->outgoing_packet_buf);
 	ssync_free(&ssync->config, ssync->record_buf);
+
 	ssync_free(&ssync->config, ssync);
 }
 
@@ -295,7 +297,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		bsv_ssync_msg_header(&bsv_packet_ctx, &header);
 
 		bool has_space = true;
-		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(ssync);
+		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_tick, ssync);
 		const ssync_snapshot_t* base_snapshot = ssync->last_snapshot;
 		bhash_index_t num_local_objects = bhash_len(&ssync->local_objects);
 
@@ -402,9 +404,9 @@ ssync_update(ssync_t* ssync, double dt) {
 			if (has_space) {
 				bhash_put(&snapshot->objects, id, current_obj);
 			} else {
-				ssync_cleanup_obj(ssync, &current_obj);
+				ssync_cleanup_obj(&current_obj, ssync);
 				ssync_obj_t copy = { 0 };
-				ssync_copy_obj(ssync, &copy, previous_obj);
+				ssync_copy_obj(&copy, previous_obj, ssync);
 				bhash_put(&snapshot->objects, id, copy);
 			}
 		}
@@ -416,7 +418,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		};
 		ssync->config.send_msg(ssync->config.userdata, msg, false);
 
-		ssync_archive_snapshot(ssync, snapshot);
+		ssync_archive_snapshot(&ssync->outgoing_archive, snapshot);
 	}
 }
 
