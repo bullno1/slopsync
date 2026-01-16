@@ -15,7 +15,9 @@ typedef void (*ssync_sync_fn_t)(
 
 typedef void (*ssync_prop_group_fn_t)(
 	void* userdata,
-	ssync_net_id_t obj_id, ssync_local_id_t prop_group_id);
+	ssync_net_id_t obj_id, ssync_local_id_t prop_group_id
+);
+
 typedef bool (*ssync_check_prop_group_fn_t)(
 	void* userdata,
 	ssync_net_id_t obj_id,
@@ -29,8 +31,15 @@ typedef void (*ssync_obj_fn_t)(
 
 typedef void (*ssync_control_fn_t)(
 	void* userdata,
+	ssync_player_id_t sender,
 	ssync_net_id_t obj_id,
 	ssync_blob_t command
+);
+
+typedef void (*ssync_send_msg_fn_t)(
+	void* userdata,
+	ssync_blob_t message,
+	bool reliable
 );
 
 typedef struct {
@@ -46,35 +55,18 @@ typedef enum {
 	SSYNC_MODE_READ,
 } ssync_mode_t;
 
-typedef enum {
-	SSYNC_PROP_INTERPOLATE = 1 << 0,
-	SSYNC_PROP_EXTRAPOLATE = 1 << 1,
-	SSYNC_PROP_POSITION_X  = 1 << 2,
-	SSYNC_PROP_POSITION_Y  = 1 << 3,
-	SSYNC_PROP_POSITION_Z  = 1 << 4,
-	SSYNC_PROP_ROTATION    = 1 << 5,
-	SSYNC_PROP_RADIUS      = 1 << 6,
-} ssync_prop_flag_t;
-
-typedef enum {
-	SSYNC_OBJ_OBSERVER = 1 << 0,
-	SSYNC_OBJ_GLOBAL   = 1 << 1,
-	SSYNC_OBJ_ONESHOT  = 1 << 2,
-} ssync_obj_flag_t;
-
-typedef int ssync_obj_flags_t;
-
 typedef struct {
-	ssync_player_id_t owner;
 	ssync_tick_t created_at;
 	ssync_tick_t updated_at;
 	ssync_tick_t simulated_at;
 	ssync_obj_flags_t flags;
+	bool is_local;
 } ssync_obj_info_t;
 
 typedef struct {
 	size_t max_message_size;
-	int position_precision;
+
+	double interpolation_ratio;
 
 	ssync_realloc_fn_t realloc;
 	ssync_obj_fn_t create_obj;
@@ -99,7 +91,7 @@ ssync_t*
 ssync_init(const ssync_config_t* config);
 
 void
-ssync_reinit(ssync_t* ssync, const ssync_config_t* config);
+ssync_reinit(ssync_t** ssync, const ssync_config_t* config);
 
 void
 ssync_cleanup(ssync_t* ssync);
@@ -119,11 +111,8 @@ ssync_update(ssync_t* ssync, double dt);
 ssync_net_id_t
 ssync_create(ssync_t* ssync, ssync_obj_flags_t flags);
 
-bool
-ssync_destroy(ssync_t* ssync, ssync_net_id_t obj_id);
-
 void
-ssync_sync(ssync_t* ssync, ssync_net_id_t obj_id);
+ssync_destroy(ssync_t* ssync, ssync_net_id_t obj_id);
 
 ssync_mode_t
 ssync_mode(ssync_ctx_t* ctx);

@@ -5,3 +5,10 @@ target_include_directories(slopsync-shared PUBLIC include)
 add_library(slopsync-client STATIC "src/client.c")
 target_link_libraries(slopsync-client PRIVATE blibs slopsync-shared)
 target_include_directories(slopsync-client PUBLIC include)
+
+add_library(slopsync-server STATIC "src/server.c")
+target_link_libraries(slopsync-server PRIVATE blibs slopsync-shared)
+target_include_directories(slopsync-server PUBLIC include)
+
+add_library(slopsyncd SHARED "src/slopsyncd.c")
+target_link_libraries(slopsyncd PRIVATE blibs slopsync-server)

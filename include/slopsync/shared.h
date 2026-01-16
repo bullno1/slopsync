@@ -5,24 +5,32 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#ifndef SSYNC_OBJ_UPDATE_MASK_TYPE
-#define SSYNC_OBJ_UPDATE_MASK_TYPE uint16_t
-#endif
-
-#ifndef SSYNC_PROP_GROUP_UPDATE_MASK_TYPE
-#define SSYNC_PROP_GROUP_UPDATE_MASK_TYPE uint16_t
-#endif
-
 typedef uint8_t ssync_player_id_t;
 typedef uint32_t ssync_tick_t;
-typedef SSYNC_OBJ_UPDATE_MASK_TYPE ssync_obj_update_mask_t;
-typedef SSYNC_PROP_GROUP_UPDATE_MASK_TYPE ssync_prop_group_update_mask_t;
+
+typedef enum {
+	SSYNC_OBJ_OBSERVER = 1 << 0,
+	SSYNC_OBJ_GLOBAL   = 1 << 1,
+	SSYNC_OBJ_ONESHOT  = 1 << 2,
+} ssync_obj_flag_t;
+
+typedef int ssync_obj_flags_t;
+
+typedef enum {
+	SSYNC_PROP_INTERPOLATE = 1 << 0,
+	SSYNC_PROP_EXTRAPOLATE = 1 << 1,
+	SSYNC_PROP_POSITION_X  = 1 << 2,
+	SSYNC_PROP_POSITION_Y  = 1 << 3,
+	SSYNC_PROP_POSITION_Z  = 1 << 4,
+	SSYNC_PROP_ROTATION    = 1 << 5,
+	SSYNC_PROP_RADIUS      = 1 << 6,
+} ssync_prop_flag_t;
+
 typedef int ssync_prop_flags_t;
 
 typedef struct {
+	uint16_t bin;
 	uint16_t index;
-	ssync_player_id_t source;
-	uint8_t gen;
 } ssync_net_id_t;
 
 typedef struct {
@@ -34,12 +42,6 @@ typedef void* (*ssync_realloc_fn_t)(
 	void* userdata,
 	void* ptr,
 	size_t size
-);
-
-typedef void (*ssync_send_msg_fn_t)(
-	void* userdata,
-	ssync_blob_t message,
-	bool reliable
 );
 
 #endif
