@@ -34,7 +34,7 @@ struct ssync_s {
 
 	uint16_t next_obj_id;
 
-	ssync_msg_header_t last_server_header;
+	ssync_snapshot_info_record_t last_server_snapshot_info;
 
 	ssync_tick_t current_tick;
 	double current_time;
@@ -47,6 +47,7 @@ struct ssync_s {
 	ssync_snapshot_pool_t outgoing_archive;
 	ssync_snapshot_pool_t incoming_archive;
 	ssync_snapshot_t* last_acked_snapshot;
+	ssync_snapshot_t* incoming_snapshot;
 	void* outgoing_packet_buf;
 	void* record_buf;
 
@@ -140,19 +141,49 @@ ssync_write_obj(ssync_t* ssync, ssync_net_id_t id, ssync_obj_t* out) {
 static bool
 ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync_init_record_t init_record = { 0 };
-	if (bsv_ssync_player_init_record(ctx, &init_record) != BSV_OK) { return false; }
+	if (bsv_ssync_init_record(ctx, &init_record) != BSV_OK) { return false; }
 
 	if (ssync->init_record.net_tick_rate != 0) {
 		BLOG_WARN("Server sends duplicated init record");
 		return false;
 	}
 
+	BLOG_INFO("Received init record");
 	ssync->init_record = init_record;
 	ssync->logic_tick_interval = 1.0 / (double)init_record.logic_tick_rate;
 	ssync->net_tick_interval = 1.0 / (double)init_record.net_tick_rate;
-	ssync->current_tick = ssync->last_server_header.current_tick;
+	ssync->current_tick = init_record.current_tick;
 	ssync->logic_tick_accumulator = 0.0;
 	ssync->net_tick_accumulator = 0.0;
+	return true;
+}
+
+static bool
+ssync_process_snapshot_info_record(ssync_t* ssync, bsv_ctx_t* ctx) {
+	ssync_snapshot_info_record_t snapshot_info = { 0 };
+	if (bsv_ssync_snapshot_info_record(ctx, &snapshot_info) != BSV_OK) { return false; }
+
+	if (snapshot_info.current_tick <= ssync->last_server_snapshot_info.current_tick) { return false; }
+	ssync->last_server_snapshot_info = snapshot_info;
+
+	if (ssync->incoming_snapshot == NULL) {
+		ssync->incoming_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, snapshot_info.current_tick, ssync);
+	} else {
+		ssync_clear_snapshot(ssync->incoming_snapshot, ssync);
+	}
+
+	ssync->last_acked_snapshot = ssync_ack_snapshot(&ssync->outgoing_archive, &ssync->snapshot_pool, snapshot_info.last_received);
+	if (ssync->last_acked_snapshot != NULL) {
+		const ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot->remote;
+		if (base_snapshot) {
+			for (bhash_index_t i = 0; i < bhash_len(&base_snapshot->objects); ++i) {
+				ssync_obj_t copy = { 0 };
+				ssync_copy_obj(&copy, &base_snapshot->objects.values[i], ssync);
+				bhash_put(&ssync->incoming_snapshot->objects, base_snapshot->objects.keys[i], copy);
+			}
+		}
+	}
+
 	return true;
 }
 
@@ -219,6 +250,10 @@ ssync_cleanup(ssync_t* ssync) {
 	ssync_cleanup_snapshot_pool(&ssync->incoming_archive, ssync);
 	ssync_cleanup_snapshot_pool(&ssync->outgoing_archive, ssync);
 
+	if (ssync->incoming_snapshot != NULL) {
+		ssync_destroy_snapshot(ssync->incoming_snapshot, ssync);
+	}
+
 	ssync_free(&ssync->config, ssync->outgoing_packet_buf);
 	ssync_free(&ssync->config, ssync->record_buf);
 
@@ -245,15 +280,6 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 	};
 	ssync_bsv_in_t bsv_in;
 	bsv_ctx_t ctx = { .in = ssync_init_bsv_in(&bsv_in, &msg_stream) };
-	ssync_msg_header_t header = { 0 };
-	if (bsv_ssync_msg_header(&ctx, &header) != BSV_OK) { return; }
-
-	// TODO: Partially accept either current_tick or ack
-	if (header.current_tick < ssync->last_server_header.current_tick) {
-		return;  // Out of order message
-	}
-
-	ssync->last_server_header = header;
 
 	while (true) {
 		ssync_record_type_t record_type;
@@ -265,8 +291,16 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 			case SSYNC_RECORD_TYPE_INIT:
 				if (!ssync_process_init_record(ssync, &ctx)) { return; }
 				break;
+			case SSYNC_RECORD_TYPE_SNAPSHOT_INFO:
+				if (!ssync_process_snapshot_info_record(ssync, &ctx)) { return; }
+				break;
 			default: return;
 		}
+	}
+
+	if (ssync->incoming_snapshot != NULL) {
+		ssync_archive_snapshot(&ssync->incoming_archive, ssync->incoming_snapshot);
+		ssync->incoming_snapshot = NULL;
 	}
 }
 
@@ -305,14 +339,19 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync_bsv_out_t bsv_packet_out;
 		bsv_ctx_t bsv_packet_ctx = { .out = ssync_init_bsv_out(&bsv_packet_out, &packet_out_stream) };
 
-		ssync_msg_header_t header = {
+		ssync_snapshot_info_record_t snapshot_info = {
 			.current_tick = ssync->current_tick,
-			.last_receive = ssync->last_server_header.current_tick,
 		};
-		bsv_ssync_msg_header(&bsv_packet_ctx, &header);
+		const ssync_snapshot_t* remote_snapshot = ssync->incoming_archive.next;
+		if (remote_snapshot != NULL) {
+			snapshot_info.last_received = remote_snapshot->tick;
+		}
+		ssync_write_record_type(&packet_out_stream, SSYNC_RECORD_TYPE_SNAPSHOT_INFO);
+		bsv_ssync_snapshot_info_record(&bsv_packet_ctx, &snapshot_info);
 
 		bool has_space = true;
 		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_tick, ssync);
+		snapshot->remote = remote_snapshot;
 		const ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot;
 		ssync_snapshot_t* tmp_snapshot = NULL;
 		if (base_snapshot == NULL) {

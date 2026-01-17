@@ -24,6 +24,7 @@ typedef SSYNC_PROP_MASK_TYPE ssync_prop_mask_t;
 
 typedef enum {
 	SSYNC_RECORD_TYPE_INIT = 0,
+	SSYNC_RECORD_TYPE_SNAPSHOT_INFO,
 	SSYNC_RECORD_TYPE_OBJ_CREATE,
 	SSYNC_RECORD_TYPE_OBJ_UPDATE,
 	SSYNC_RECORD_TYPE_OBJ_DESTROY,
@@ -34,16 +35,17 @@ typedef enum {
 } ssync_record_type_t;
 
 typedef struct {
-	ssync_tick_t current_tick;
-	ssync_tick_t last_receive;
-} ssync_msg_header_t;
-
-typedef struct {
 	ssync_player_id_t player_id;
 	ssync_tick_t logic_tick_rate;
 	ssync_tick_t net_tick_rate;
+	ssync_tick_t current_tick;
 	uint16_t obj_id_bin;
 } ssync_init_record_t;
+
+typedef struct {
+	ssync_tick_t current_tick;
+	ssync_tick_t last_received;
+} ssync_snapshot_info_record_t;
 
 typedef int64_t ssync_prop_t;
 
@@ -75,6 +77,7 @@ typedef struct ssync_snapshot_s ssync_snapshot_t;
 
 struct ssync_snapshot_s {
 	ssync_snapshot_t* next;
+	const ssync_snapshot_t* remote;
 	ssync_tick_t tick;
 
 	BHASH_TABLE(ssync_net_id_t, ssync_obj_t) objects;
@@ -159,12 +162,25 @@ ssync_reinit_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
 }
 
 static inline void
+ssync_clear_snapshot(ssync_snapshot_t* snapshot, void* memctx) {
+	for (bhash_index_t i = 0; i < bhash_len(&snapshot->objects); ++i) {
+		ssync_cleanup_obj(&snapshot->objects.values[i], memctx);
+	}
+}
+
+static inline void
+ssync_destroy_snapshot(ssync_snapshot_t* snapshot, void* memctx) {
+	ssync_clear_snapshot(snapshot, memctx);
+	bhash_cleanup(&snapshot->objects);
+	ssync_host_realloc(snapshot, 0, memctx);
+}
+
+static inline void
 ssync_cleanup_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
-	for (ssync_snapshot_t* itr = pool->next; itr != NULL; itr = itr->next) {
-		for (bhash_index_t i = 0; i < bhash_len(&itr->objects); ++i) {
-			ssync_cleanup_obj(&itr->objects.values[i], memctx);
-		}
-		bhash_cleanup(&itr->objects);
+	for (ssync_snapshot_t* itr = pool->next; itr != NULL;) {
+		ssync_snapshot_t* next = itr->next;
+		ssync_destroy_snapshot(itr, memctx);
+		itr = next;
 	}
 }
 
@@ -175,9 +191,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_tick_t tick, void* mem
 		snapshot = pool->next;
 		pool->next = snapshot->next;
 
-		for (bhash_index_t i = 0; i < bhash_len(&snapshot->objects); ++i) {
-			ssync_cleanup_obj(&snapshot->objects.values[i], memctx);
-		}
+		ssync_clear_snapshot(snapshot, memctx);
 		bhash_clear(&snapshot->objects);
 	} else {
 		snapshot = ssync_host_realloc(NULL, sizeof(ssync_snapshot_t), memctx);
@@ -186,6 +200,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_tick_t tick, void* mem
 	}
 
 	snapshot->tick = tick;
+	snapshot->remote = NULL;
 	return snapshot;
 }
 
@@ -401,14 +416,14 @@ bsv_ssync_tick(bsv_ctx_t* ctx, ssync_tick_t* tick) {
 }
 
 static inline bsv_status_t
-bsv_ssync_msg_header(bsv_ctx_t* ctx, ssync_msg_header_t* header) {
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &header->current_tick));
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &header->last_receive));
+bsv_ssync_snapshot_info_record(bsv_ctx_t* ctx, ssync_snapshot_info_record_t* rec) {
+	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->current_tick));
+	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->last_received));
 	return bsv_status(ctx);
 }
 
 static inline bsv_status_t
-bsv_ssync_player_init_record(bsv_ctx_t* ctx, ssync_init_record_t* rec) {
+bsv_ssync_init_record(bsv_ctx_t* ctx, ssync_init_record_t* rec) {
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->player_id));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->net_tick_rate));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->logic_tick_rate));
