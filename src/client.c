@@ -209,7 +209,10 @@ ssync_process_object_update_record(ssync_t* ssync, bsv_ctx_t* ctx, bitstream_in_
 	if (bsv_ssync_net_id(ctx, &id) != BSV_OK) { return false; }
 
 	const ssync_obj_t* base_obj = bhash_get_value(&ssync->last_acked_snapshot->remote->objects, id);
-	if (base_obj == NULL) { return false; }
+	ssync_obj_t empty_obj = { 0 };
+	if (base_obj == NULL) {
+		base_obj = &empty_obj;
+	}
 
 	ssync_obj_t updated_obj = { 0 };
 	if (!ssync_read_obj_update(ctx, in, ssync, &ssync->schema, base_obj, &updated_obj)) {
@@ -288,6 +291,9 @@ ssync_cleanup(ssync_t* ssync) {
 		ssync_destroy_snapshot(ssync->incoming_snapshot, ssync);
 	}
 
+	barray_free(ssync->created_objects, ssync);
+	barray_free(ssync->destroyed_objects, ssync);
+
 	ssync_free(&ssync->config, ssync->outgoing_packet_buf);
 	ssync_free(&ssync->config, ssync->record_buf);
 
@@ -358,8 +364,27 @@ ssync_update(ssync_t* ssync, double dt) {
 	while (ssync->logic_tick_accumulator >= ssync->logic_tick_interval) {
 		ssync->logic_tick_accumulator -= ssync->logic_tick_interval;
 		ssync->current_tick += 1;
-		// TODO: execute creation and destruction
 
+		// Execute queued creations
+		int num_created_objects = (int)barray_len(ssync->created_objects);
+		int num_delayed_creations = 0;
+		for (int i = 0; i < num_created_objects; ++i) {
+			ssync_obj_create_record_t* record = &ssync->created_objects[i];
+			if (record->timestamp <= ssync->current_tick) {
+				ssync_obj_info_t info = {
+					.created_at = record->timestamp,
+					.flags = record->flags,
+					.is_local = false,
+				};
+				bhash_put(&ssync->remote_objects, record->id, info);
+				ssync->config.create_obj(ssync->config.userdata, record->id);
+			} else {
+				ssync->created_objects[num_delayed_creations++] = *record;
+			}
+		}
+		barray_resize(ssync->created_objects, num_delayed_creations, ssync);
+
+		// Update existing objects
 		bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
 		for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
 			ssync_ctx_t ctx = {
@@ -368,6 +393,20 @@ ssync_update(ssync_t* ssync, double dt) {
 			};
 			ssync->config.sync(ssync->config.userdata, &ctx, ssync->remote_objects.keys[i]);
 		}
+
+		// Execute queued destructions
+		int num_destroyed_objects = (int)barray_len(ssync->destroyed_objects);
+		int num_delayed_destructions = 0;
+		for (int i = 0; i < num_destroyed_objects; ++i) {
+			ssync_obj_destroy_record_t* record = &ssync->destroyed_objects[i];
+			if (record->timestamp <= ssync->current_tick) {
+				ssync->config.destroy_obj(ssync->config.userdata, record->id);
+				bhash_remove(&ssync->remote_objects, record->id);
+			} else {
+				ssync->destroyed_objects[num_delayed_destructions++] = *record;
+			}
+		}
+		barray_resize(ssync->destroyed_objects, num_delayed_destructions, ssync);
 	}
 
 	// Send local objects

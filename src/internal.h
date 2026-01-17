@@ -682,6 +682,8 @@ ssync_read_obj_update(
 					// Do nothing
 					break;
 				case SSYNC_PROP_GROUP_OP_UPDATE:
+					if (!previous_has_prop_group) { return false; }
+
 					current_obj->prop_group_mask |= mask;
 					for (int prop_index = 0; prop_index < num_props; ++prop_index) {
 						uint8_t changed;
