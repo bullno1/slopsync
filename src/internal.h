@@ -69,8 +69,6 @@ typedef enum {
 	SSYNC_PROP_GROUP_OP_ADD = 0,
 	SSYNC_PROP_GROUP_OP_UPDATE,
 	SSYNC_PROP_GROUP_OP_REMOVE,
-
-	SSYNC_PROP_GROUP_OP_COUNT,
 } ssync_prop_group_op_t;
 
 typedef struct ssync_snapshot_s ssync_snapshot_t;
@@ -520,16 +518,30 @@ ssync_write_bitmask(bitstream_out_t* bitstream, uint32_t mask, size_t num_bits) 
 	return bitstream_write(bitstream, bytes, num_bits);
 }
 
+static inline bool
+ssync_read_bitmask(bitstream_in_t* bitstream, uint32_t* mask, size_t num_bits) {
+	_Static_assert(sizeof(ssync_prop_group_mask_t) <= sizeof(mask), "Mask type is too small");
+	_Static_assert(sizeof(ssync_prop_mask_t) <= sizeof(mask), "Mask type is too small");
+
+	uint8_t bytes[4] = { 0 };
+	bool result = bitstream_read(bitstream, bytes, num_bits);
+
+	*mask = (uint32_t)bytes[0] <<  0
+		  | (uint32_t)bytes[1] <<  8
+		  | (uint32_t)bytes[2] << 16
+		  | (uint32_t)bytes[3] << 24;
+
+	return result;
+}
+
 static inline void
 ssync_write_obj_update(
+	bsv_ctx_t* bsv,
 	bitstream_out_t* bitstream,
 	const ssync_obj_schema_t* schema,
 	const ssync_obj_t* current_obj,
 	const ssync_obj_t* previous_obj
 ) {
-	ssync_bsv_out_t bsv_out;
-	bsv_ctx_t bsv = { .out = ssync_init_bsv_out(&bsv_out, bitstream) };
-
 	// Gather the update mask
 	ssync_prop_group_mask_t update_mask = 0;
 	const ssync_prop_t* current_props = current_obj->props;
@@ -607,7 +619,7 @@ ssync_write_obj_update(
 							}
 
 							bitstream_write(bitstream, &method, 1);
-							bsv_auto(&bsv, &out_value);
+							bsv_auto(bsv, &out_value);
 						}
 					}
 				} else {  // Fully write all props
@@ -615,7 +627,7 @@ ssync_write_obj_update(
 
 					for (int prop_index = 0; prop_index < num_props; ++prop_index) {
 						ssync_prop_t value = current_props[prop_index];
-						bsv_auto(&bsv, &value);
+						bsv_auto(bsv, &value);
 					}
 				}
 			} else {
@@ -628,6 +640,77 @@ ssync_write_obj_update(
 		if (current_has_prop_group) { current_props += num_props; }
 		if (previous_has_prop_group) { previous_props += num_props; }
 	}
+}
+
+static inline bool
+ssync_read_obj_update(
+	bsv_ctx_t* bsv,
+	bitstream_in_t* bitstream,
+	void* memctx,
+	const ssync_obj_schema_t* schema,
+	const ssync_obj_t* previous_obj,
+	ssync_obj_t* current_obj
+) {
+	ssync_prop_group_mask_t update_mask;
+	if (!ssync_read_bitmask(bitstream, &update_mask, schema->num_prop_groups)) {
+		return false;
+	}
+
+	const ssync_prop_t* previous_props = previous_obj->props;
+
+	for (int prop_group_index = 0; prop_group_index < schema->num_prop_groups; ++prop_group_index) {
+		ssync_prop_group_mask_t mask = 1 << prop_group_index;
+		const ssync_prop_group_schema_t* prop_group = &schema->prop_groups[prop_group_index];
+		int num_props = prop_group->num_props;
+		bool previous_has_prop_group = (previous_obj->prop_group_mask & mask) != 0;
+
+		if (update_mask & mask) {  // change
+			uint8_t op;
+			if (!bitstream_read(bitstream, &op, 2)) { return false; }
+
+			switch ((ssync_prop_group_op_t)op) {
+				case SSYNC_PROP_GROUP_OP_ADD:
+					current_obj->prop_group_mask |= mask;
+					for (int prop_index = 0; prop_index < num_props; ++prop_index) {
+						ssync_prop_t value;
+						if (bsv_auto(bsv, &value) != BSV_OK) { return false; }
+
+						barray_push(current_obj->props, value, memctx);
+					}
+					break;
+				case SSYNC_PROP_GROUP_OP_REMOVE:
+					// Do nothing
+					break;
+				case SSYNC_PROP_GROUP_OP_UPDATE:
+					current_obj->prop_group_mask |= mask;
+					for (int prop_index = 0; prop_index < num_props; ++prop_index) {
+						uint8_t changed;
+						if (!bitstream_read(bitstream, &changed, 1)) { return false; }
+						if (!changed) { continue; }
+
+						uint8_t delta;
+						if (!bitstream_read(bitstream, &delta, 1)) { return false; }
+						int64_t value;
+						if (bsv_auto(bsv, &value) != BSV_OK) { return false; }
+
+						int64_t new_value = delta ? previous_props[prop_index] + value : value;
+						barray_push(current_obj->props, new_value, memctx);
+					}
+					break;
+			}
+		} else {  // No change
+			if (previous_has_prop_group) {
+				for (int prop_index = 0; prop_index < num_props; ++prop_index) {
+					barray_push(current_obj->props, previous_props[prop_index], memctx);
+				}
+				current_obj->prop_group_mask |= mask;
+			}
+		}
+
+		if (previous_has_prop_group) { previous_props += num_props; }
+	}
+
+	return true;
 }
 
 // }}}
