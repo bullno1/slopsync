@@ -352,7 +352,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		bool has_space = true;
 		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_tick, ssync);
 		snapshot->remote = remote_snapshot;
-		const ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot;
+		ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot;
 		ssync_snapshot_t* tmp_snapshot = NULL;
 		if (base_snapshot == NULL) {
 			base_snapshot = tmp_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, 0, ssync);
@@ -429,30 +429,28 @@ ssync_update(ssync_t* ssync, double dt) {
 		}
 
 		// State change since the last snapshot
+		ssync_obj_t empty_obj = { 0 };
 		for (bhash_index_t i = 0; i < num_local_objects; ++i) {
 			ssync_net_id_t id = ssync->local_objects.keys[i];
 
-			ssync_obj_t empty_obj = { 0 };
-			const ssync_obj_t* previous_obj = &empty_obj;
-			bhash_index_t index = bhash_find(&base_snapshot->objects, id);
-			if (bhash_is_valid(index)) {
-				previous_obj = &base_snapshot->objects.values[index];
-			}
+			const ssync_obj_t* previous_obj = bhash_get_value(&base_snapshot->objects, id);
 
 			ssync_obj_t current_obj = { 0 };
 			if (has_space) {
+				const ssync_obj_t* diff_target = previous_obj != NULL ? previous_obj : &empty_obj;
+
 				// Most of the time, an object has the same size
-				barray_reserve(current_obj.props, barray_len(previous_obj->props), ssync);
+				barray_reserve(current_obj.props, barray_len(diff_target->props), ssync);
 				ssync_write_obj(ssync, id, &current_obj);
 
-				if (!ssync_obj_equal(&ssync->schema, &current_obj, previous_obj)) {
+				if (!ssync_obj_equal(&ssync->schema, &current_obj, diff_target)) {
 					// Write to a temp buffer first
 					bitstream_out_t record_out_stream = {
 						.data = ssync->record_buf,
 						.num_bytes = ssync->config.max_message_size,
 					};
 					ssync_write_record_type(&record_out_stream, SSYNC_RECORD_TYPE_OBJ_UPDATE);
-					ssync_write_obj_update(&record_out_stream, &ssync->schema, &current_obj, previous_obj);
+					ssync_write_obj_update(&record_out_stream, &ssync->schema, &current_obj, diff_target);
 
 					// Try appending to the packet
 					has_space &= bitstream_append(&packet_out_stream, &record_out_stream);
@@ -462,7 +460,7 @@ ssync_update(ssync_t* ssync, double dt) {
 			// Store the effective object for later diff
 			if (has_space) {
 				bhash_put(&snapshot->objects, id, current_obj);
-			} else {
+			} else if (previous_obj != NULL) {
 				ssync_cleanup_obj(&current_obj, ssync);
 				ssync_obj_t copy = { 0 };
 				ssync_copy_obj(&copy, previous_obj, ssync);
