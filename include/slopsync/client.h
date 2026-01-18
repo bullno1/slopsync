@@ -47,6 +47,7 @@ typedef struct {
 	ssync_tick_t current_tick;
 	ssync_tick_t net_tick_rate;
 	ssync_tick_t logic_tick_rate;
+	size_t schema_size;
 } ssync_info_t;
 
 typedef enum {
@@ -81,12 +82,6 @@ typedef struct {
 	void* userdata;
 } ssync_config_t;
 
-size_t
-ssync_schema_size(ssync_sync_fn_t sync, void* userdata);
-
-void
-ssync_write_schema(ssync_sync_fn_t sync, void* userdata, void* out, size_t out_size);
-
 ssync_t*
 ssync_init(const ssync_config_t* config);
 
@@ -96,7 +91,10 @@ ssync_reinit(ssync_t** ssync, const ssync_config_t* config);
 void
 ssync_cleanup(ssync_t* ssync);
 
-const ssync_info_t*
+void
+ssync_write_schema(ssync_t* ssync, void* out);
+
+ssync_info_t
 ssync_info(ssync_t* ssync);
 
 const ssync_obj_info_t*

@@ -28,14 +28,15 @@ struct ssync_ctx_s {
 
 struct ssync_s {
 	ssync_config_t config;
+
 	ssync_obj_schema_t schema;
+	size_t schema_size;
 
 	ssync_init_record_t init_record;
 
 	uint16_t next_obj_id;
 
 	ssync_tick_t last_server_tick;
-
 	ssync_tick_t current_tick;
 	double current_time;
 	double logic_tick_accumulator;
@@ -97,43 +98,12 @@ ssync_finalize_prop_group(ssync_ctx_t* ctx) {
 }
 
 static void
-ssync_write_schema_impl(ssync_sync_fn_t sync, void* userdata, bsv_ctx_t* ctx) {
-	// Use reflection to extract schema
-	ssync_obj_schema_t schema = { 0 };
-	ssync_ctx_t sync_ctx = {
-		.mode = SSYNC_MODE_REFLECT,
-		.schema = &schema,
-	};
-	sync(userdata, &sync_ctx, (ssync_net_id_t){ 0 });
-	ssync_finalize_prop_group(&sync_ctx);
-	schema.num_prop_groups = sync_ctx.prop_group_index;
-
-	// Encode schema
-	bsv_ssync_obj_schema(ctx, &schema);
-}
-
-static void
 ssync_reflect_add_prop(ssync_ctx_t* ctx, ssync_prop_type_t type, int precision, ssync_prop_flags_t flags) {
 	ctx->schema->prop_groups[ctx->prop_group_index - 1].props[ctx->prop_index] = (ssync_prop_schema_t){
 		.type = type,
 		.precision = precision,
 		.flags = flags,
 	};
-}
-
-// }}}
-
-// Snapshot {{{
-
-static void
-ssync_write_obj(ssync_t* ssync, ssync_net_id_t id, ssync_obj_t* out) {
-	ssync_ctx_t ctx = {
-		.mode = SSYNC_MODE_WRITE,
-		.ssync = ssync,
-		.obj = out,
-		.obj_id = id,
-	};
-	ssync->config.sync(ssync->config.userdata, &ctx, id);
 }
 
 // }}}
@@ -226,22 +196,6 @@ ssync_process_object_update_record(ssync_t* ssync, bsv_ctx_t* ctx, bitstream_in_
 
 // }}}
 
-size_t
-ssync_schema_size(ssync_sync_fn_t sync, void* userdata) {
-	ssync_bsv_count_t count_stream;
-	bsv_ctx_t ctx = { .out = ssync_init_bsv_count(&count_stream) };
-	ssync_write_schema_impl(sync, userdata, &ctx);
-	return count_stream.count;
-}
-
-void
-ssync_write_schema(ssync_sync_fn_t sync, void* userdata, void* out, size_t out_size) {
-	bitstream_out_t out_stream = { .data = out, .num_bytes = out_size };
-	ssync_bsv_out_t bsv_out;
-	bsv_ctx_t ctx = { .out = ssync_init_bsv_out(&bsv_out, &out_stream) };
-	ssync_write_schema_impl(sync, userdata, &ctx);
-}
-
 static inline void
 ssync_do_reinit(ssync_t* ssync, const ssync_config_t* config) {
 	ssync->config = *config;
@@ -257,6 +211,20 @@ ssync_do_reinit(ssync_t* ssync, const ssync_config_t* config) {
 
 	ssync->outgoing_packet_buf = ssync_realloc(config, ssync->outgoing_packet_buf, config->max_message_size);
 	ssync->record_buf = ssync_realloc(config, ssync->record_buf, config->max_message_size);
+
+	// Use reflection to extract schema
+	ssync_ctx_t sync_ctx = {
+		.mode = SSYNC_MODE_REFLECT,
+		.schema = &ssync->schema,
+	};
+	config->sync(config->userdata, &sync_ctx, (ssync_net_id_t){ 0 });
+	ssync_finalize_prop_group(&sync_ctx);
+	ssync->schema.num_prop_groups = sync_ctx.prop_group_index;
+
+	ssync_bsv_count_t count_stream;
+	bsv_ctx_t ctx = { .out = ssync_init_bsv_count(&count_stream) };
+	bsv_ssync_obj_schema(&ctx, &ssync->schema);
+	ssync->schema_size = count_stream.count;
 }
 
 ssync_t*
@@ -300,8 +268,24 @@ ssync_cleanup(ssync_t* ssync) {
 	ssync_free(&ssync->config, ssync);
 }
 
-const ssync_info_t*
-ssync_info(ssync_t* ssync);
+void
+ssync_write_schema(ssync_t* ssync, void* out) {
+	bitstream_out_t out_stream = { .data = out, .num_bytes = ssync->schema_size };
+	ssync_bsv_out_t bsv_out;
+	bsv_ctx_t ctx = { .out = ssync_init_bsv_out(&bsv_out, &out_stream) };
+	bsv_ssync_obj_schema(&ctx, &ssync->schema);
+}
+
+ssync_info_t
+ssync_info(ssync_t* ssync) {
+	return (ssync_info_t){
+		.player_id = ssync->init_record.player_id,
+		.current_tick = ssync->current_tick,
+		.net_tick_rate = ssync->init_record.net_tick_rate,
+		.logic_tick_rate = ssync->init_record.logic_tick_rate,
+		.schema_size = ssync->schema_size,
+	};
+}
 
 const ssync_obj_info_t*
 ssync_obj_info(ssync_t* ssync, ssync_net_id_t obj_id) {
