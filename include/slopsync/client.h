@@ -44,9 +44,9 @@ typedef void (*ssync_send_msg_fn_t)(
 
 typedef struct {
 	ssync_player_id_t player_id;
-	ssync_tick_t current_tick;
-	ssync_tick_t net_tick_rate;
-	ssync_tick_t logic_tick_rate;
+	ssync_timestamp_t current_time;
+	ssync_timestamp_t net_tick_rate;
+	ssync_timestamp_t logic_tick_rate;
 	size_t schema_size;
 } ssync_info_t;
 
@@ -57,9 +57,9 @@ typedef enum {
 } ssync_mode_t;
 
 typedef struct {
-	ssync_tick_t created_at;
-	ssync_tick_t updated_at;
-	ssync_tick_t simulated_at;
+	ssync_timestamp_t created_at;
+	ssync_timestamp_t updated_at;
+	ssync_timestamp_t simulated_at;
 	ssync_obj_flags_t flags;
 	bool is_local;
 } ssync_obj_info_t;

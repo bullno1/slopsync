@@ -22,6 +22,7 @@ struct ssync_ctx_s {
 
 	ssync_net_id_t obj_id;
 	ssync_obj_t* obj;
+	ssync_obj_t* next_obj;
 	int prop_group_index;
 	int prop_index;
 };
@@ -36,9 +37,10 @@ struct ssync_s {
 
 	uint16_t next_obj_id;
 
-	ssync_tick_t last_server_tick;
-	ssync_tick_t current_tick;
-	double current_time;
+	ssync_timestamp_t last_server_time;
+	ssync_timestamp_t current_time_ms;
+	ssync_timestamp_t interpolation_delay;
+	double current_time_s;
 	double logic_tick_accumulator;
 	double net_tick_accumulator;
 	double logic_tick_interval;
@@ -124,7 +126,9 @@ ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync->init_record = init_record;
 	ssync->logic_tick_interval = 1.0 / (double)init_record.logic_tick_rate;
 	ssync->net_tick_interval = 1.0 / (double)init_record.net_tick_rate;
-	ssync->current_tick = init_record.current_tick;
+	ssync->current_time_ms = init_record.current_time;
+	ssync->current_time_s = (double)ssync->current_time_ms / 1000.0;
+	ssync->interpolation_delay = (ssync_timestamp_t)(ssync->config.interpolation_ratio / (double)init_record.net_tick_rate * 1000.0);
 	ssync->logic_tick_accumulator = 0.0;
 	ssync->net_tick_accumulator = 0.0;
 	return true;
@@ -135,11 +139,11 @@ ssync_process_snapshot_info_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync_snapshot_info_record_t record;
 	if (bsv_ssync_snapshot_info_record(ctx, &record) != BSV_OK) { return false; }
 
-	if (record.current_tick <= ssync->last_server_tick) { return false; }
-	ssync->last_server_tick = record.current_tick;
+	if (record.current_time <= ssync->last_server_time) { return false; }
+	ssync->last_server_time = record.current_time;
 
 	if (ssync->incoming_snapshot == NULL) {
-		ssync->incoming_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, record.current_tick, ssync);
+		ssync->incoming_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, record.current_time, ssync);
 	} else {
 		ssync_clear_snapshot(ssync->incoming_snapshot, ssync);
 	}
@@ -168,6 +172,16 @@ ssync_process_object_destroy_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	if (bsv_ssync_obj_destroy_record(ctx, &record) != BSV_OK) { return false; }
 
 	barray_push(ssync->destroyed_objects, record, ssync);
+
+	// Copy the object from the previous snapshot into the next snapshot so that
+	// the object keeps getting interpolated until destruction
+	const ssync_obj_t* base_obj = bhash_get_value(&ssync->last_acked_snapshot->remote->objects, record.id);
+	if (base_obj != NULL) {
+		ssync_obj_t copy = { 0 };
+		ssync_copy_obj(&copy, base_obj, ssync);
+		bhash_put(&ssync->incoming_snapshot->objects, record.id, copy);
+	}
+
 	return true;
 }
 
@@ -280,7 +294,7 @@ ssync_info_t
 ssync_info(ssync_t* ssync) {
 	return (ssync_info_t){
 		.player_id = ssync->init_record.player_id,
-		.current_tick = ssync->current_tick,
+		.current_time = ssync->current_time_ms,
 		.net_tick_rate = ssync->init_record.net_tick_rate,
 		.logic_tick_rate = ssync->init_record.logic_tick_rate,
 		.schema_size = ssync->schema_size,
@@ -341,20 +355,20 @@ void
 ssync_update(ssync_t* ssync, double dt) {
 	if (ssync->init_record.net_tick_rate == 0) { return; }
 
-	ssync->current_time += dt;
 	ssync->logic_tick_accumulator += dt;
 
 	// Interpolate remote objects
 	while (ssync->logic_tick_accumulator >= ssync->logic_tick_interval) {
 		ssync->logic_tick_accumulator -= ssync->logic_tick_interval;
-		ssync->current_tick += 1;
+		ssync->current_time_s += ssync->logic_tick_interval;
+		ssync->current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 
 		// Execute queued creations
 		int num_created_objects = (int)barray_len(ssync->created_objects);
 		int num_delayed_creations = 0;
 		for (int i = 0; i < num_created_objects; ++i) {
 			ssync_obj_create_record_t* record = &ssync->created_objects[i];
-			if (record->timestamp <= ssync->current_tick) {
+			if (record->timestamp <= ssync->current_time_ms) {
 				ssync_obj_info_t info = {
 					.created_at = record->timestamp,
 					.flags = record->flags,
@@ -374,13 +388,34 @@ ssync_update(ssync_t* ssync, double dt) {
 		barray_resize(ssync->created_objects, num_delayed_creations, ssync);
 
 		// Update existing objects
-		bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
-		for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
-			ssync_ctx_t ctx = {
-				.mode = SSYNC_MODE_READ,
-				.ssync = ssync,
-			};
-			ssync->config.sync(ssync->config.userdata, &ctx, ssync->remote_objects.keys[i]);
+		if (ssync->current_time_ms > ssync->interpolation_delay) {
+			ssync_timestamp_t simulation_time = ssync->current_time_ms - ssync->interpolation_delay;
+			const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(&ssync->incoming_archive, simulation_time);
+			if (next_snapshot != NULL) {
+				const ssync_snapshot_t* prev_snapshot = next_snapshot->next;
+
+				bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
+				for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
+					ssync_net_id_t id = ssync->remote_objects.keys[i];
+					ssync_obj_t* from_obj = bhash_get_value(&prev_snapshot->objects, id);
+					ssync_obj_t* to_obj = bhash_get_value(&next_snapshot->objects, id);
+
+					if (from_obj == NULL || to_obj == NULL) { continue; }
+
+					ssync_obj_info_t* obj_info = &ssync->remote_objects.values[i];
+					obj_info->updated_at = prev_snapshot->timestamp;
+					obj_info->simulated_at = simulation_time;
+
+					ssync_ctx_t ctx = {
+						.mode = SSYNC_MODE_READ,
+						.ssync = ssync,
+						.obj_id = id,
+						.obj = from_obj,
+						.next_obj = to_obj,
+					};
+					ssync->config.sync(ssync->config.userdata, &ctx, id);
+				}
+			}
 		}
 
 		// Execute queued destructions
@@ -388,7 +423,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		int num_delayed_destructions = 0;
 		for (int i = 0; i < num_destroyed_objects; ++i) {
 			ssync_obj_destroy_record_t* record = &ssync->destroyed_objects[i];
-			if (record->timestamp <= ssync->current_tick) {
+			if (record->timestamp <= ssync->current_time_ms) {
 				if (bhash_has(&ssync->remote_objects, record->id)) {
 					ssync->config.destroy_obj(ssync->config.userdata, record->id);
 					bhash_remove(&ssync->remote_objects, record->id);
@@ -413,17 +448,17 @@ ssync_update(ssync_t* ssync, double dt) {
 		bsv_ctx_t bsv_packet_ctx = { .out = ssync_init_bsv_out(&bsv_packet_out, &packet_out_stream) };
 
 		ssync_snapshot_info_record_t snapshot_info = {
-			.current_tick = ssync->current_tick,
+			.current_time = ssync->current_time_ms,
 		};
 		const ssync_snapshot_t* remote_snapshot = ssync->incoming_archive.next;
 		if (remote_snapshot != NULL) {
-			snapshot_info.last_received = remote_snapshot->tick;
+			snapshot_info.last_received = remote_snapshot->timestamp;
 		}
 		ssync_write_record_type(&packet_out_stream, SSYNC_RECORD_TYPE_SNAPSHOT_INFO);
 		bsv_ssync_snapshot_info_record(&bsv_packet_ctx, &snapshot_info);
 
 		bool has_space = true;
-		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_tick, ssync);
+		ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, ssync->current_time_ms, ssync);
 		snapshot->remote = remote_snapshot;
 		const ssync_snapshot_t* base_snapshot = ssync->last_acked_snapshot;
 		ssync_snapshot_t* tmp_snapshot = NULL;
@@ -485,7 +520,7 @@ ssync_update(ssync_t* ssync, double dt) {
 					.id = id,
 					// TODO: this might not be accurate and we may need to record
 					// destruction time separately
-					.timestamp = ssync->current_tick,
+					.timestamp = ssync->current_time_ms,
 				};
 				bsv_ssync_obj_destroy_record(&bsv_record_ctx, &record);
 
@@ -514,7 +549,13 @@ ssync_update(ssync_t* ssync, double dt) {
 
 				// Most of the time, an object has the same size
 				barray_reserve(current_obj.props, barray_len(diff_target->props), ssync);
-				ssync_write_obj(ssync, id, &current_obj);
+				ssync_ctx_t ctx = {
+					.mode = SSYNC_MODE_WRITE,
+					.ssync = ssync,
+					.obj_id = id,
+					.obj = &current_obj,
+				};
+				ssync->config.sync(ssync->config.userdata, &ctx, id);
 
 				if (!ssync_obj_equal(&ssync->schema, &current_obj, diff_target)) {
 					// Write to a temp buffer first
@@ -578,7 +619,7 @@ ssync_create(ssync_t* ssync, ssync_obj_flags_t flags) {
 	}
 
 	ssync_obj_info_t data = {
-		.created_at = ssync->current_tick,
+		.created_at = ssync->current_time_ms,
 		.flags = flags,
 		.is_local = true,
 	};

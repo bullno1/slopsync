@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 typedef uint8_t ssync_player_id_t;
-typedef uint32_t ssync_tick_t;
+typedef uint32_t ssync_timestamp_t;
 
 typedef enum {
 	SSYNC_OBJ_OBSERVER = 1 << 0,

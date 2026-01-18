@@ -6,9 +6,9 @@
 typedef struct ssyncd_s ssyncd_t;
 
 typedef struct {
-	ssync_tick_t current_tick;
-	ssync_tick_t net_tick_rate;
-	ssync_tick_t logic_tick_rate;
+	ssync_timestamp_t current_time;
+	ssync_timestamp_t net_tick_rate;
+	ssync_timestamp_t logic_tick_rate;
 } ssyncd_info_t;
 
 typedef void (*ssyncd_send_msg_fn_t)(
@@ -22,8 +22,8 @@ typedef struct {
 	size_t max_message_size;
 	int max_num_players;
 
-	ssync_tick_t net_tick_rate;
-	ssync_tick_t logic_tick_rate;
+	ssync_timestamp_t net_tick_rate;
+	ssync_timestamp_t logic_tick_rate;
 
 	ssync_realloc_fn_t realloc;
 	ssyncd_send_msg_fn_t send_msg;

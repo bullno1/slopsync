@@ -36,15 +36,15 @@ typedef enum {
 
 typedef struct {
 	ssync_player_id_t player_id;
-	ssync_tick_t logic_tick_rate;
-	ssync_tick_t net_tick_rate;
-	ssync_tick_t current_tick;
+	ssync_timestamp_t logic_tick_rate;
+	ssync_timestamp_t net_tick_rate;
+	ssync_timestamp_t current_time;
 	uint16_t obj_id_bin;
 } ssync_init_record_t;
 
 typedef struct {
-	ssync_tick_t current_tick;
-	ssync_tick_t last_received;
+	ssync_timestamp_t current_time;
+	ssync_timestamp_t last_received;
 } ssync_snapshot_info_record_t;
 
 typedef int64_t ssync_prop_t;
@@ -56,13 +56,13 @@ typedef struct {
 
 typedef struct {
 	ssync_net_id_t id;
-	ssync_tick_t timestamp;
+	ssync_timestamp_t timestamp;
 	ssync_obj_flags_t flags;
 } ssync_obj_create_record_t;
 
 typedef struct {
 	ssync_net_id_t id;
-	ssync_tick_t timestamp;
+	ssync_timestamp_t timestamp;
 } ssync_obj_destroy_record_t;
 
 typedef enum {
@@ -76,7 +76,7 @@ typedef struct ssync_snapshot_s ssync_snapshot_t;
 struct ssync_snapshot_s {
 	ssync_snapshot_t* next;
 	const ssync_snapshot_t* remote;
-	ssync_tick_t tick;
+	ssync_timestamp_t timestamp;
 
 	BHASH_TABLE(ssync_net_id_t, ssync_obj_t) objects;
 };
@@ -183,7 +183,7 @@ ssync_cleanup_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
 }
 
 static inline ssync_snapshot_t*
-ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_tick_t tick, void* memctx) {
+ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_timestamp_t timestamp, void* memctx) {
 	ssync_snapshot_t* snapshot;
 	if (pool->next != NULL) {
 		snapshot = pool->next;
@@ -197,7 +197,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_tick_t tick, void* mem
 		ssync_reinit_snapshot(snapshot, memctx);
 	}
 
-	snapshot->tick = tick;
+	snapshot->timestamp = timestamp;
 	snapshot->remote = NULL;
 	return snapshot;
 }
@@ -214,12 +214,12 @@ ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapsho
 
 	// Traverse the list to find the insertion point
 	while (*itr != NULL) {
-		if ((*itr)->tick == snapshot->tick) {
-			// Duplicate tick found, do not insert
+		if ((*itr)->timestamp == snapshot->timestamp) {
+			// Duplicate timestamp found, do not insert
 			return false;
 		}
 
-		if ((*itr)->tick < snapshot->tick) {
+		if ((*itr)->timestamp < snapshot->timestamp) {
 			break;
 		}
 		itr = &(*itr)->next;
@@ -246,16 +246,16 @@ static inline ssync_snapshot_t*
 ssync_ack_snapshot(
 	ssync_snapshot_pool_t* archive,
 	ssync_snapshot_pool_t* pool,
-	ssync_tick_t tick
+	ssync_timestamp_t timestamp
 ) {
 	ssync_snapshot_t* itr = archive->next;
 	while (itr != NULL) {
-		if (itr->tick == tick) {
+		if (itr->timestamp == timestamp) {
 			ssync_release_after(pool, itr);
 			return itr;
 		}
 
-		if (itr->tick < tick) {
+		if (itr->timestamp < timestamp) {
 			// Since list is in descending order, no match exists
 			return NULL;
 		}
@@ -267,14 +267,14 @@ ssync_ack_snapshot(
 }
 
 static inline const ssync_snapshot_t*
-ssync_find_snapshot_pair(const ssync_snapshot_pool_t* archive, ssync_tick_t tick) {
+ssync_find_snapshot_pair(const ssync_snapshot_pool_t* archive, ssync_timestamp_t timestamp) {
 	const ssync_snapshot_t* itr = archive->next;
 
 	while (itr != NULL && itr->next != NULL) {
 		const ssync_snapshot_t* a = itr;
 		const ssync_snapshot_t* b = itr->next;
 
-		if (b->tick <= tick && tick < a->tick) {
+		if (b->timestamp <= timestamp && timestamp < a->timestamp) {
 			return a;
 		}
 
@@ -407,16 +407,16 @@ bsv_ssync_net_id(bsv_ctx_t* ctx, ssync_net_id_t* id) {
 }
 
 static inline bsv_status_t
-bsv_ssync_tick(bsv_ctx_t* ctx, ssync_tick_t* tick) {
-	_Static_assert(sizeof(*tick) == sizeof(uint32_t), "Type mismatch");
-	BSV_CHECK_STATUS(bsv_u32_fixed(ctx, tick));
+bsv_ssync_timestamp(bsv_ctx_t* ctx, ssync_timestamp_t* timestamp) {
+	_Static_assert(sizeof(*timestamp) == sizeof(uint32_t), "Type mismatch");
+	BSV_CHECK_STATUS(bsv_u32_fixed(ctx, timestamp));
 	return bsv_status(ctx);
 }
 
 static inline bsv_status_t
 bsv_ssync_snapshot_info_record(bsv_ctx_t* ctx, ssync_snapshot_info_record_t* rec) {
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->current_tick));
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->last_received));
+	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->current_time));
+	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->last_received));
 	return bsv_status(ctx);
 }
 
@@ -432,7 +432,7 @@ bsv_ssync_init_record(bsv_ctx_t* ctx, ssync_init_record_t* rec) {
 static inline bsv_status_t
 bsv_ssync_obj_create_record(bsv_ctx_t* ctx, ssync_obj_create_record_t* rec) {
 	BSV_CHECK_STATUS(bsv_ssync_net_id(ctx, &rec->id));
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->timestamp));
+	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->timestamp));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->flags));  // Maybe shrink to bit size
 	return bsv_status(ctx);
 }
@@ -440,7 +440,7 @@ bsv_ssync_obj_create_record(bsv_ctx_t* ctx, ssync_obj_create_record_t* rec) {
 static inline bsv_status_t
 bsv_ssync_obj_destroy_record(bsv_ctx_t* ctx, ssync_obj_destroy_record_t* rec) {
 	BSV_CHECK_STATUS(bsv_ssync_net_id(ctx, &rec->id));
-	BSV_CHECK_STATUS(bsv_ssync_tick(ctx, &rec->timestamp));
+	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->timestamp));
 	return bsv_status(ctx);
 }
 
