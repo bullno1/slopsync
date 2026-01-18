@@ -376,8 +376,13 @@ ssync_update(ssync_t* ssync, double dt) {
 					.flags = record->flags,
 					.is_local = false,
 				};
-				bhash_put(&ssync->remote_objects, record->id, info);
-				ssync->config.create_obj(ssync->config.userdata, record->id);
+
+				bhash_alloc_result_t alloc_result = bhash_alloc(&ssync->remote_objects, record->id);
+				if (alloc_result.is_new) {
+					ssync->remote_objects.keys[alloc_result.index] = record->id;
+					ssync->remote_objects.values[alloc_result.index] = info;
+					ssync->config.create_obj(ssync->config.userdata, record->id);
+				}
 			} else {
 				ssync->created_objects[num_delayed_creations++] = *record;
 			}
@@ -400,8 +405,10 @@ ssync_update(ssync_t* ssync, double dt) {
 		for (int i = 0; i < num_destroyed_objects; ++i) {
 			ssync_obj_destroy_record_t* record = &ssync->destroyed_objects[i];
 			if (record->timestamp <= ssync->current_tick) {
-				ssync->config.destroy_obj(ssync->config.userdata, record->id);
-				bhash_remove(&ssync->remote_objects, record->id);
+				if (bhash_has(&ssync->remote_objects, record->id)) {
+					ssync->config.destroy_obj(ssync->config.userdata, record->id);
+					bhash_remove(&ssync->remote_objects, record->id);
+				}
 			} else {
 				ssync->destroyed_objects[num_delayed_destructions++] = *record;
 			}
