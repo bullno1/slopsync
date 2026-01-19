@@ -124,31 +124,31 @@ ssync_control(ssync_t* ssync, ssync_net_id_t obj, ssync_blob_t command);
 bool
 ssync_prop_group(ssync_ctx_t* ctx, ssync_local_id_t id);
 
-bool
+void
 ssync_prop_int(ssync_ctx_t* ctx, int64_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_float(ssync_ctx_t* ctx, float* value, int precision, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_u8(ssync_ctx_t* ctx, uint8_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_s8(ssync_ctx_t* ctx, int8_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_u16(ssync_ctx_t* ctx, uint16_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_s16(ssync_ctx_t* ctx, int16_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_u32(ssync_ctx_t* ctx, uint32_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_s32(ssync_ctx_t* ctx, int32_t* value, ssync_prop_flags_t flags);
 
-bool
+void
 ssync_prop_u64(ssync_ctx_t* ctx, uint64_t* value, ssync_prop_flags_t flags);
 
 #endif
