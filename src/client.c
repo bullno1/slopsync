@@ -39,7 +39,6 @@ struct ssync_s {
 
 	uint16_t next_obj_id;
 
-	ssync_timestamp_t last_server_time;
 	ssync_timestamp_t current_time_ms;
 	ssync_timestamp_t interpolation_delay;
 	double current_time_s;
@@ -144,13 +143,17 @@ ssync_process_snapshot_info_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync_snapshot_info_record_t record;
 	if (bsv_ssync_snapshot_info_record(ctx, &record) != BSV_OK) { return false; }
 
-	if (record.current_time <= ssync->last_server_time) { return false; }
-	ssync->last_server_time = record.current_time;
+	ssync_timestamp_t last_snapshot_time = 0;
+	if (ssync->incoming_archive.next != NULL) {
+		last_snapshot_time = ssync->incoming_archive.next->timestamp;
+	}
+	if (record.current_time <= last_snapshot_time) { return false; }
 
 	if (ssync->incoming_snapshot == NULL) {
 		ssync->incoming_snapshot = ssync_acquire_snapshot(&ssync->snapshot_pool, record.current_time, ssync);
 	} else {
 		ssync_clear_snapshot(ssync->incoming_snapshot, ssync);
+		ssync->incoming_snapshot->timestamp = record.current_time;
 	}
 
 	ssync->last_acked_snapshot = ssync_ack_snapshot(&ssync->outgoing_archive, &ssync->snapshot_pool, record.last_received);
