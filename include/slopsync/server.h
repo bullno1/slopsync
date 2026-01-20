@@ -51,4 +51,7 @@ ssyncd_remove_player(ssyncd_t* ssyncd, int id);
 void
 ssyncd_update(ssyncd_t* ssyncd, double dt);
 
+void
+ssyncd_broadcast(ssyncd_t* ssyncd);
+
 #endif

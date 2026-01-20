@@ -139,6 +139,8 @@ ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 
 static bool
 ssync_process_snapshot_info_record(ssync_t* ssync, bsv_ctx_t* ctx) {
+	if (ssync->init_record.net_tick_rate == 0) { return false; }
+
 	ssync_snapshot_info_record_t record;
 	if (bsv_ssync_snapshot_info_record(ctx, &record) != BSV_OK) { return false; }
 
@@ -615,7 +617,7 @@ ssync_update(ssync_t* ssync, double dt) {
 
 			if (!has_space) {
 				// Put an empty object into the snapshot if not written so we
-				// can try resending destruction data
+				// will try resending destruction data in the next snapshot
 				ssync_obj_t empty_obj = { 0 };
 				bhash_put(&snapshot->objects, id, empty_obj);
 			}

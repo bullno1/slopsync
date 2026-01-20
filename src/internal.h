@@ -212,6 +212,19 @@ ssync_release_snapshot(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) 
 	pool->next = snapshot->next;
 }
 
+static inline void
+ssync_release_archive(ssync_snapshot_pool_t* pool, ssync_snapshot_pool_t* archive) {
+	ssync_snapshot_t* itr = archive->next;
+
+	while (itr != NULL) {
+		ssync_snapshot_t* to_release = itr;
+		itr = itr->next;
+		ssync_release_snapshot(pool, to_release);
+	}
+
+	archive->next = NULL;
+}
+
 static inline bool
 ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapshot) {
 	ssync_snapshot_t** itr = &archive->next;

@@ -54,6 +54,7 @@ event(void* ctx, const snetd_event_t* event) {
 			ssyncd_update(ssd->ssd, ssd->dt);
 			break;
 		case SNETD_EVENT_BROADCAST:
+			ssyncd_broadcast(ssd->ssd);
 			break;
 		case SNETD_EVENT_PLAYER_JOINING:
 			snetd_allow_join(ssd->env);
