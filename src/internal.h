@@ -134,6 +134,7 @@ ssync_cleanup_obj(ssync_obj_t* obj, void* memctx) {
 
 static inline void
 ssync_copy_obj(ssync_obj_t* dst, const ssync_obj_t* src, void* memctx) {
+	dst->prop_group_mask = src->prop_group_mask;
 	size_t num_props = barray_len(src->props);
 	barray_resize(dst->props, num_props, memctx);
 	memcpy(dst->props, src->props, num_props * sizeof(ssync_prop_t));
