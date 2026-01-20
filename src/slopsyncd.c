@@ -36,13 +36,16 @@ init(snetd_env_t* env, const snetd_game_options_t* options) {
 		.ssd = ssyncd_init(&config),
 		.dt = 1.0 / (double)config.logic_tick_rate,
 	};
+	if (ssd->ssd == NULL) { snetd_terminate(env); }
+
 	return ssd;
 }
 
 static void
 cleanup(void* ctx) {
 	slopsyncd_t* ssd = ctx;
-	ssyncd_cleanup(ssd->ssd);
+	if (ssd->ssd != NULL) { ssyncd_cleanup(ssd->ssd); }
+
 	snetd_free(ssd->env, ssd);
 }
 
