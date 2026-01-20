@@ -43,6 +43,7 @@ struct ssync_s {
 	ssync_timestamp_t current_time_ms;
 	ssync_timestamp_t interpolation_delay;
 	double current_time_s;
+	double simulation_time_s;
 	double logic_tick_accumulator;
 	double net_tick_accumulator;
 	double logic_tick_interval;
@@ -426,12 +427,34 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync->current_time_s += ssync->logic_tick_interval;
 		ssync->current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 
+		const ssync_snapshot_t* next_snapshot = NULL;
+		if (ssync->simulation_time_s == 0.0) {
+			if (
+				ssync->incoming_archive.next != NULL
+				&&
+				ssync->incoming_archive.next->timestamp > ssync->interpolation_delay
+			) {
+				ssync_timestamp_t simulation_time_ms = ssync->incoming_archive.next->timestamp - ssync->interpolation_delay;
+				next_snapshot = ssync_find_snapshot_pair(&ssync->incoming_archive, simulation_time_ms);
+				if (next_snapshot != NULL) {
+					ssync->simulation_time_s = (double)simulation_time_ms / 1000.0;
+					BLOG_DEBUG("Started interpolation at %dms (current time: %dms)", simulation_time_ms, ssync->current_time_ms);
+				}
+			}
+		} else {
+			ssync->simulation_time_s += ssync->logic_tick_interval;
+		}
+
+		if (ssync->simulation_time_s == 0.0) { continue; }
+		ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0);
+		const ssync_snapshot_t* prev_snapshot = next_snapshot->next;
+
 		// Execute queued creations
 		int num_created_objects = (int)barray_len(ssync->created_objects);
 		int num_delayed_creations = 0;
 		for (int i = 0; i < num_created_objects; ++i) {
 			ssync_obj_create_record_t* record = &ssync->created_objects[i];
-			if (record->timestamp <= ssync->current_time_ms) {
+			if (record->timestamp <= simulation_time_ms) {
 				ssync_obj_info_t info = {
 					.created_at = record->timestamp,
 					.flags = record->flags,
@@ -451,40 +474,33 @@ ssync_update(ssync_t* ssync, double dt) {
 		barray_resize(ssync->created_objects, num_delayed_creations, ssync);
 
 		// Update existing objects
-		if (ssync->current_time_ms > ssync->interpolation_delay) {
-			ssync_timestamp_t simulation_time = ssync->current_time_ms - ssync->interpolation_delay;
-			const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(&ssync->incoming_archive, simulation_time);
-			if (next_snapshot != NULL) {
-				const ssync_snapshot_t* prev_snapshot = next_snapshot->next;
-				float interpolant =
-					  (float)(simulation_time - prev_snapshot->timestamp)
-					/ (float)(next_snapshot->timestamp - prev_snapshot->timestamp);
+		float interpolant =
+			  (float)(simulation_time_ms - prev_snapshot->timestamp)
+			/ (float)(next_snapshot->timestamp - prev_snapshot->timestamp);
 
-				bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
-				for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
-					ssync_net_id_t id = ssync->remote_objects.keys[i];
-					ssync_obj_t* from_obj = bhash_get_value(&prev_snapshot->objects, id);
-					ssync_obj_t* to_obj = bhash_get_value(&next_snapshot->objects, id);
+		bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
+		for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
+			ssync_net_id_t id = ssync->remote_objects.keys[i];
+			ssync_obj_t* from_obj = bhash_get_value(&prev_snapshot->objects, id);
+			ssync_obj_t* to_obj = bhash_get_value(&next_snapshot->objects, id);
 
-					if (from_obj == NULL || to_obj == NULL) { continue; }
+			if (from_obj == NULL || to_obj == NULL) { continue; }
 
-					ssync_obj_info_t* obj_info = &ssync->remote_objects.values[i];
-					obj_info->updated_at = prev_snapshot->timestamp;
-					obj_info->simulated_at = simulation_time;
+			ssync_obj_info_t* obj_info = &ssync->remote_objects.values[i];
+			obj_info->updated_at = prev_snapshot->timestamp;
+			obj_info->simulated_at = simulation_time_ms;
 
-					ssync_ctx_t ctx = {
-						.mode = SSYNC_MODE_READ,
-						.ssync = ssync,
-						.obj_id = id,
-						.obj = from_obj,
-						.next_obj = to_obj,
-						.prev_props = from_obj->props,
-						.next_props = to_obj->props,
-						.interpolant = interpolant,
-					};
-					ssync->config.sync(ssync->config.userdata, &ctx, id);
-				}
-			}
+			ssync_ctx_t ctx = {
+				.mode = SSYNC_MODE_READ,
+				.ssync = ssync,
+				.obj_id = id,
+				.obj = from_obj,
+				.next_obj = to_obj,
+				.prev_props = from_obj->props,
+				.next_props = to_obj->props,
+				.interpolant = interpolant,
+			};
+			ssync->config.sync(ssync->config.userdata, &ctx, id);
 		}
 
 		// Execute queued destructions
@@ -492,7 +508,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		int num_delayed_destructions = 0;
 		for (int i = 0; i < num_destroyed_objects; ++i) {
 			ssync_obj_destroy_record_t* record = &ssync->destroyed_objects[i];
-			if (record->timestamp <= ssync->current_time_ms) {
+			if (record->timestamp <= simulation_time_ms) {
 				if (bhash_has(&ssync->remote_objects, record->id)) {
 					ssync->config.destroy_obj(ssync->config.userdata, record->id);
 					bhash_remove(&ssync->remote_objects, record->id);
