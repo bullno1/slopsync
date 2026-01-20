@@ -1037,17 +1037,13 @@ ssync_process_snapshot_info_record(ssync_incoming_packet_ctx_t* ctx) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	endpoint->last_acked_snapshot = ssync_ack_snapshot(
+	ssync_snapshot_t* last_acked_snapshot = ssync_ack_snapshot(
 		&endpoint->outgoing_archive, config->snapshot_pool, record.last_received
 	);
-	if (
-		endpoint->last_acked_snapshot != NULL
-		&&
-		endpoint->last_acked_snapshot->remote != NULL
-	) {
+	if (last_acked_snapshot != NULL && last_acked_snapshot->remote != NULL) {
 		// Make copies of every existing object so that those without updates
 		// appear unchanged
-		const ssync_snapshot_t* base_snapshot = endpoint->last_acked_snapshot->remote;
+		const ssync_snapshot_t* base_snapshot = last_acked_snapshot->remote;
 		for (bhash_index_t i = 0; i < bhash_len(&base_snapshot->objects); ++i) {
 			ssync_net_id_t id = base_snapshot->objects.keys[i];
 			const ssync_obj_t* obj = &base_snapshot->objects.values[i];
@@ -1056,6 +1052,10 @@ ssync_process_snapshot_info_record(ssync_incoming_packet_ctx_t* ctx) {
 			bhash_put(&ctx->incoming_snapshot->objects, id, copy);
 		}
 	}
+	if (last_acked_snapshot == NULL && record.last_received != 0) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+	endpoint->last_acked_snapshot = last_acked_snapshot;
 
 	return true;
 }
