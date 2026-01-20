@@ -209,18 +209,22 @@ ssync_process_object_update_record(ssync_t* ssync, bsv_ctx_t* ctx, bitstream_in_
 	ssync_net_id_t id;
 	if (bsv_ssync_net_id(ctx, &id) != BSV_OK) { return false; }
 
-	const ssync_obj_t* base_obj = bhash_get_value(&ssync->last_acked_snapshot->remote->objects, id);
+	const ssync_obj_t* base_obj = NULL;
+	if (
+		ssync->last_acked_snapshot != NULL
+		&&
+		ssync->last_acked_snapshot->remote != NULL
+	) {
+		base_obj = bhash_get_value(&ssync->last_acked_snapshot->remote->objects, id);
+	}
+
 	ssync_obj_t empty_obj = { 0 };
 	if (base_obj == NULL) {
 		base_obj = &empty_obj;
 	}
 
 	ssync_obj_t* updated_obj = bhash_get_value(&ssync->incoming_snapshot->objects, id);
-	if (updated_obj == NULL) { return false; }
-	barray_clear(updated_obj->props);
-
-	if (!ssync_read_obj_update(ctx, in, ssync, &ssync->schema, base_obj, updated_obj)) {
-		ssync_cleanup_obj(updated_obj, ssync);
+	if (updated_obj == NULL || !ssync_read_obj_update(ctx, in, ssync, &ssync->schema, base_obj, updated_obj)) {
 		return false;
 	}
 

@@ -674,6 +674,9 @@ ssync_read_obj_update(
 		return false;
 	}
 
+	barray_clear(current_obj->props);
+	current_obj->prop_group_mask = 0;
+
 	const ssync_prop_t* previous_props = previous_obj->props;
 
 	for (int prop_group_index = 0; prop_group_index < schema->num_prop_groups; ++prop_group_index) {
