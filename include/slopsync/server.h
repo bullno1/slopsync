@@ -43,15 +43,12 @@ void
 ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int sender);
 
 void
-ssyncd_add_player(ssyncd_t* ssyncd, ssync_blob_t msg, int id, const char* username);
+ssyncd_add_player(ssyncd_t* ssyncd, int id, const char* username);
 
 void
-ssyncd_remove_player(ssyncd_t* ssyncd, ssync_blob_t msg, int id);
+ssyncd_remove_player(ssyncd_t* ssyncd, int id);
 
 void
 ssyncd_update(ssyncd_t* ssyncd, double dt);
-
-const ssyncd_info_t*
-ssyncd_info(ssyncd_t* ssyncd);
 
 #endif
