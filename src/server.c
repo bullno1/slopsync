@@ -13,13 +13,12 @@ typedef struct {
 typedef struct {
 	const char* username;
 	uint16_t obj_id_bin;
-	ssync_snapshot_t* last_acked_snapshot;
-	ssync_snapshot_pool_t incoming_archive;
-	ssync_snapshot_pool_t outgoing_archive;
+	ssync_endpoint_t endpoint;
 } ssyncd_player_info_t;
 
 struct ssyncd_s {
 	ssyncd_config_t config;
+	ssync_endpoint_config_t endpoint_config;
 
 	double current_time_s;
 
@@ -31,7 +30,6 @@ struct ssyncd_s {
 	void* record_buf;
 
 	ssync_obj_schema_t schema;
-	ssync_snapshot_t* incoming_snapshot;
 
 	BHASH_TABLE(ssync_net_id_t, ssyncd_obj_info_t) objects;
 };
@@ -72,301 +70,32 @@ static void
 ssyncd_write_snapshot(
 	ssyncd_t* ssyncd,
 	int player_id, ssyncd_player_info_t* player,
-	bitstream_out_t* packet_out_stream, bsv_ctx_t* bsv_packet_out
+	bitstream_out_t* packet_out_stream, bsv_ctx_t* packet_out_bsv
 ) {
 	ssync_timestamp_t current_time_ms = (ssync_timestamp_t)(ssyncd->current_time_s * 1000.0);
 
-	ssync_snapshot_info_record_t snapshot_info = {
-		.current_time = current_time_ms,
-	};
-	const ssync_snapshot_t* remote_snapshot = player->incoming_archive.next;
-	if (remote_snapshot != NULL) {
-		snapshot_info.last_received = remote_snapshot->timestamp;
-	}
-	ssync_write_record_type(packet_out_stream, SSYNC_RECORD_TYPE_SNAPSHOT_INFO);
-	bsv_ssync_snapshot_info_record(bsv_packet_out, &snapshot_info);
+	ssync_outgoing_snapshot_ctx_t ctx;
+	ssync_begin_outgoing_snapshot(
+		&ctx,
+		&player->endpoint,
+		current_time_ms,
+		packet_out_stream, packet_out_bsv
+	);
 
-	bool has_space = true;
-	ssync_snapshot_t* snapshot = ssync_acquire_snapshot(&ssyncd->snapshot_pool, current_time_ms, ssyncd);
-	snapshot->remote = remote_snapshot;
-
-	const ssync_snapshot_t* base_snapshot = player->last_acked_snapshot;
-	ssync_snapshot_t* tmp_snapshot = NULL;
-	if (base_snapshot == NULL) {
-		base_snapshot = tmp_snapshot = ssync_acquire_snapshot(&ssyncd->snapshot_pool, 0, ssyncd);
-	}
-
-	// Created objects since the last snapshot
-	bhash_index_t num_objects = bhash_len(&ssyncd->objects);
-	for (bhash_index_t i = 0; has_space && i < num_objects; ++i) {
-		ssync_net_id_t obj_id = ssyncd->objects.keys[i];
-		if (bhash_has(&base_snapshot->objects, obj_id)) { continue; }
-
-		const ssyncd_obj_info_t* obj = &ssyncd->objects.values[i];
-		if (obj->authority == player_id) { continue; }  // Don't send to owner
-
-		// Write to a temp buffer first
-		bitstream_out_t record_out_stream = {
-			.data = ssyncd->record_buf,
-			.num_bytes = ssyncd->config.max_message_size,
-		};
-		ssync_bsv_out_t bsv_record_out;
-		bsv_ctx_t bsv_record_ctx = { .out = ssync_init_bsv_out(&bsv_record_out, &record_out_stream) };
-		ssync_write_record_type(&record_out_stream, SSYNC_RECORD_TYPE_OBJ_CREATE);
-		ssync_obj_create_record_t record = {
-			.id = obj_id,
-			.timestamp = obj->created_at,
-			.flags = obj->flags,
-		};
-		bsv_ssync_obj_create_record(&bsv_record_ctx, &record);
-
-		// Try appending to the packet
-		bool written = bitstream_append(packet_out_stream, &record_out_stream);
-		if (written) {
-			// Put an empty object into the snapshot so when this snapshot is
-			// ack-ed, we stop trying to resend object creation data
-			ssync_obj_t empty_obj = { 0 };
-			bhash_put(&snapshot->objects, obj_id, empty_obj);
-		}
-		has_space &= written;
-	}
-
-	// Destroyed objects since the last snapshot
-	bhash_index_t num_snapshotted_objects = bhash_len(&base_snapshot->objects);
-	for (bhash_index_t i = 0; i < num_snapshotted_objects; ++i) {
-		ssync_net_id_t id = base_snapshot->objects.keys[i];
-		if (bhash_has(&ssyncd->objects, id)) { continue; }
-
-		// Because we don't send an object to its owner, the fact that it appears
-		// in a previous snapshot means this user does not own it
-		if (has_space) {
-			// Write to a temp buffer first
-			bitstream_out_t record_out_stream = {
-				.data = ssyncd->record_buf,
-				.num_bytes = ssyncd->config.max_message_size,
-			};
-			ssync_bsv_out_t bsv_record_out;
-			bsv_ctx_t bsv_record_ctx = { .out = ssync_init_bsv_out(&bsv_record_out, &record_out_stream) };
-			ssync_write_record_type(&record_out_stream, SSYNC_RECORD_TYPE_OBJ_DESTROY);
-			ssync_obj_destroy_record_t record = {
-				.id = id,
-				.timestamp = current_time_ms,
-			};
-			bsv_ssync_obj_destroy_record(&bsv_record_ctx, &record);
-
-			// Try appending to the packet
-			has_space &= bitstream_append(packet_out_stream, &record_out_stream);
-		}
-
-		if (!has_space) {
-			// Put an empty object into the snapshot if not written so we
-			// will try resending destruction data in the next snapshot
-			ssync_obj_t empty_obj = { 0 };
-			bhash_put(&snapshot->objects, id, empty_obj);
-		}
-	}
-
-	// State change since the last snapshot
-	ssync_obj_t empty_obj = { 0 };
-	for (bhash_index_t i = 0; i < num_objects; ++i) {
+	bhash_index_t num_objs = bhash_len(&ssyncd->objects);
+	for (bhash_index_t i = 0; i < num_objs; ++i) {
 		ssync_net_id_t id = ssyncd->objects.keys[i];
-		const ssyncd_obj_info_t* obj_info = &ssyncd->objects.values[i];
-		if (obj_info->authority == player_id) { continue; }  // Don't send to owner
+		const ssyncd_obj_info_t* info = &ssyncd->objects.values[i];
+		if (info->authority == player_id) { continue; }
 
-		const ssync_obj_t* current_obj = &obj_info->data;
-		const ssync_obj_t* previous_obj = bhash_get_value(&base_snapshot->objects, id);
-
-		if (has_space) {
-			const ssync_obj_t* diff_target = previous_obj != NULL ? previous_obj : &empty_obj;
-
-			// TODO: This comparison can be skipped if the local copy of the snapshot
-			// stores the update timestamp
-			if (!ssync_obj_equal(&ssyncd->schema, current_obj, diff_target)) {
-				// Write to a temp buffer first
-				bitstream_out_t record_out_stream = {
-					.data = ssyncd->record_buf,
-					.num_bytes = ssyncd->config.max_message_size,
-				};
-				ssync_bsv_out_t bsv_record_out;
-				bsv_ctx_t bsv_record_ctx = { .out = ssync_init_bsv_out(&bsv_record_out, &record_out_stream) };
-
-				ssync_write_record_type(&record_out_stream, SSYNC_RECORD_TYPE_OBJ_UPDATE);
-				bsv_ssync_net_id(&bsv_record_ctx, &id);
-				ssync_write_obj_update(
-					&bsv_record_ctx,
-					&record_out_stream,
-					&ssyncd->schema,
-					current_obj, diff_target
-				);
-
-				// Try appending to the packet
-				has_space &= bitstream_append(packet_out_stream, &record_out_stream);
-			}
-		}
-
-		// Store the effective object for later diff
-		ssync_obj_t copy = { 0 };
-		if (has_space) {
-			ssync_copy_obj(&copy, current_obj, ssyncd);
-		} else if (previous_obj != NULL) {
-			ssync_copy_obj(&copy, previous_obj, ssyncd);
-		}
-		bhash_put(&snapshot->objects, id, copy);
+		ssync_add_outgoing_obj(
+			&ctx,
+			info->created_at, info->flags,
+			id, &info->data
+		);
 	}
 
-	if (tmp_snapshot != NULL) {
-		ssync_release_snapshot(&ssyncd->snapshot_pool, tmp_snapshot);
-	}
-}
-
-static bool
-ssyncd_process_snapshot_info_record(
-	ssyncd_t* ssyncd,
-	int player_id, ssyncd_player_info_t* player,
-	bsv_ctx_t* ctx
-) {
-	ssync_snapshot_info_record_t record;
-	if (bsv_ssync_snapshot_info_record(ctx, &record) != BSV_OK) { return false; }
-
-	ssync_timestamp_t last_snapshot_time = 0;
-	if (player->incoming_archive.next != NULL) {
-		last_snapshot_time = player->incoming_archive.next->timestamp;
-	}
-	if (record.current_time <= last_snapshot_time) { return false; }
-
-	if (ssyncd->incoming_snapshot == NULL) {
-		ssyncd->incoming_snapshot = ssync_acquire_snapshot(&ssyncd->snapshot_pool, record.current_time, ssyncd);
-	} else {
-		ssync_clear_snapshot(ssyncd->incoming_snapshot, ssyncd);
-		ssyncd->incoming_snapshot->timestamp = record.current_time;
-	}
-
-	player->last_acked_snapshot = ssync_ack_snapshot(&player->outgoing_archive, &ssyncd->snapshot_pool, record.last_received);
-	if (player->last_acked_snapshot != NULL && player->last_acked_snapshot->remote != NULL) {
-		// Make copies of every existing object so that those without updates
-		// appear unchanged
-		const ssync_snapshot_t* base_snapshot = player->last_acked_snapshot->remote;
-		for (bhash_index_t i = 0; i < bhash_len(&base_snapshot->objects); ++i) {
-			ssync_net_id_t id = base_snapshot->objects.keys[i];
-			const ssync_obj_t* obj = &base_snapshot->objects.values[i];
-			ssync_obj_t copy = { 0 };
-			ssync_copy_obj(&copy, obj, ssyncd);
-			bhash_put(&ssyncd->incoming_snapshot->objects, id, copy);
-		}
-	}
-
-	return true;
-}
-
-static bool
-ssyncd_process_object_create_record(
-	ssyncd_t* ssyncd,
-	int player_id, ssyncd_player_info_t* player,
-	bsv_ctx_t* ctx
-) {
-	if (ssyncd->incoming_snapshot == NULL) { return false; }
-
-	ssync_obj_create_record_t record;
-	if (bsv_ssync_obj_create_record(ctx, &record) != BSV_OK) { return false; }
-
-	if (record.id.bin != player->obj_id_bin) { return false; }  // Not allowed
-
-	// Put an empty object in the snapshot for later updates
-	{
-		bhash_alloc_result_t alloc_result = bhash_alloc(&ssyncd->incoming_snapshot->objects, record.id);
-		if (!alloc_result.is_new) { return false; }  // Duplicated entry
-
-		ssyncd->incoming_snapshot->objects.keys[alloc_result.index] = record.id;
-		ssyncd->incoming_snapshot->objects.values[alloc_result.index] = (ssync_obj_t){ 0 };
-	}
-
-	// Apply creation immediately to the object db
-	// It is possible that the creation command is duplicated due to latency
-	{
-		bhash_alloc_result_t alloc_result = bhash_alloc(&ssyncd->objects, record.id);
-		if (alloc_result.is_new) {
-			ssyncd->objects.keys[alloc_result.index] = record.id;
-			ssyncd->objects.values[alloc_result.index] = (ssyncd_obj_info_t){
-				.authority = player_id,
-				.created_at = (ssync_timestamp_t)(ssyncd->current_time_s * 1000.0),
-				.flags = record.flags,
-			};
-		}
-	}
-
-	return true;
-}
-
-static bool
-ssyncd_process_object_destroy_record(
-	ssyncd_t* ssyncd,
-	int player_id, ssyncd_player_info_t* player,
-	bsv_ctx_t* ctx
-) {
-	if (ssyncd->incoming_snapshot == NULL) { return false; }
-
-	ssync_obj_destroy_record_t record;
-	if (bsv_ssync_obj_destroy_record(ctx, &record) != BSV_OK) { return false; }
-
-	// Remove the object from the snapshot for future delta update.
-	// This does not actually acknowledge the player's authority to destroy it since
-	// each player has their own snapshot archive.
-	bhash_index_t index = bhash_remove(&ssyncd->incoming_snapshot->objects, record.id);
-	if (bhash_is_valid(index)) {
-		ssync_cleanup_obj(&ssyncd->incoming_snapshot->objects.values[index], ssyncd);
-	}
-
-	// Apply destruction to object db
-	ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, record.id);
-	if (obj_info == NULL) { return true; }  // Duplicated deletion due to latency
-	if (obj_info->authority != player_id) { return false; }  // Not allowed
-
-	ssync_cleanup_obj(&obj_info->data, ssyncd);
-	bhash_remove(&ssyncd->objects, record.id);
-
-	return true;
-}
-
-static bool
-ssyncd_process_object_update_record(
-	ssyncd_t* ssyncd,
-	int player_id, ssyncd_player_info_t* player,
-	bsv_ctx_t* ctx, bitstream_in_t* in
-) {
-	if (ssyncd->incoming_snapshot == NULL) { return false; }
-
-	ssync_net_id_t id;
-	if (bsv_ssync_net_id(ctx, &id) != BSV_OK) { return false; }
-
-	// Update the snapshot state first
-	// This does not actually acknowledge the player's authority to update
-	const ssync_obj_t* base_obj = NULL;
-	if (
-		player->last_acked_snapshot != NULL
-		&&
-		player->last_acked_snapshot->remote != NULL
-	) {
-		base_obj = bhash_get_value(&player->last_acked_snapshot->remote->objects, id);
-	}
-
-	ssync_obj_t empty_obj = { 0 };
-	if (base_obj == NULL) {
-		base_obj = &empty_obj;
-	}
-
-	ssync_obj_t* updated_obj = bhash_get_value(&ssyncd->incoming_snapshot->objects, id);
-	if (updated_obj == NULL || !ssync_read_obj_update(ctx, in, ssyncd, &ssyncd->schema, base_obj, updated_obj)) {
-		return false;
-	}
-
-	// Apply update to object db
-	ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, id);
-	if (obj_info == NULL || obj_info->authority != player_id) {
-		return false;
-	}
-	ssync_copy_obj(&obj_info->data, updated_obj, ssyncd);
-
-	return true;
+	ssync_end_outgoing_snapshot(&ctx);
 }
 
 // }}}
@@ -401,6 +130,13 @@ ssyncd_init(const ssyncd_config_t* config) {
 		.schema = schema,
 	};
 	memset(ssd->players, 0, sizeof(ssyncd_player_info_t) * config->max_num_players);
+	ssd->endpoint_config = (ssync_endpoint_config_t){
+		.max_message_size = config->max_message_size,
+		.memctx = ssd,
+		.record_buf = ssd->record_buf,
+		.schema = &ssd->schema,
+		.snapshot_pool = &ssd->snapshot_pool
+	};
 
 	bhash_config_t hconfig = bhash_config_default();
 	hconfig.memctx = ssd;
@@ -412,14 +148,9 @@ ssyncd_init(const ssyncd_config_t* config) {
 void
 ssyncd_cleanup(ssyncd_t* ssyncd) {
 	for (int i = 0; i < ssyncd->config.max_num_players; ++i) {
-		ssync_cleanup_snapshot_pool(&ssyncd->players[i].incoming_archive, ssyncd);
-		ssync_cleanup_snapshot_pool(&ssyncd->players[i].outgoing_archive, ssyncd);
+		ssync_cleanup_endpoint(&ssyncd->players[i].endpoint);
 	}
 	ssync_cleanup_snapshot_pool(&ssyncd->snapshot_pool, ssyncd);
-
-	if (ssyncd->incoming_snapshot != NULL) {
-		ssync_destroy_snapshot(ssyncd->incoming_snapshot, ssyncd);
-	}
 
 	bhash_cleanup(&ssyncd->objects);
 
@@ -435,6 +166,7 @@ ssyncd_add_player(ssyncd_t* ssyncd, int id, const char* username) {
 	ssyncd_player_info_t* player = &ssyncd->players[id];
 	player->obj_id_bin = ++ssyncd->obj_id_bin;
 	player->username = username;
+	ssync_reinit_endpoint(&player->endpoint, &ssyncd->endpoint_config);
 
 	bitstream_out_t packet_out_stream = {
 		.data = ssyncd->outgoing_packet_buf,
@@ -469,51 +201,113 @@ void
 ssyncd_remove_player(ssyncd_t* ssyncd, int id) {
 	ssyncd_player_info_t* player = &ssyncd->players[id];
 	player->username = NULL;
-	ssync_release_archive(&ssyncd->snapshot_pool, &player->incoming_archive);
-	ssync_release_archive(&ssyncd->snapshot_pool, &player->outgoing_archive);
-	player->last_acked_snapshot = NULL;
+	ssync_cleanup_endpoint(&player->endpoint);
 	// TODO: destroy observers
 	// TODO: handover non-observers
 }
 
 void
 ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
-	bitstream_in_t msg_stream = {
+	bitstream_in_t packet_stream = {
 		.data = msg.data,
 		.num_bytes = msg.size,
 	};
 	ssync_bsv_in_t bsv_in;
-	bsv_ctx_t ctx = { .in = ssync_init_bsv_in(&bsv_in, &msg_stream) };
+	bsv_ctx_t packet_bsv = { .in = ssync_init_bsv_in(&bsv_in, &packet_stream) };
 	ssyncd_player_info_t* player = &ssyncd->players[player_id];
+
+	ssync_incoming_packet_ctx_t ctx;
+	ssync_begin_incoming_packet(&ctx, &player->endpoint, &packet_stream, &packet_bsv);
 
 	while (true) {
 		ssync_record_type_t record_type;
-		if (!ssync_read_record_type(&msg_stream, &record_type)) {
+		if (!ssync_read_record_type(&packet_stream, &record_type)) {
 			break;
 		}
 
-		// TODO: kick misbehaving clients
 		switch ((ssync_record_type_t)record_type) {
-			case SSYNC_RECORD_TYPE_SNAPSHOT_INFO:
-				if (!ssyncd_process_snapshot_info_record(ssyncd, player_id, player, &ctx)) { return; }
-				break;
-			case SSYNC_RECORD_TYPE_OBJ_CREATE:
-				if (!ssyncd_process_object_create_record(ssyncd, player_id, player, &ctx)) { return; }
-				break;
-			case SSYNC_RECORD_TYPE_OBJ_DESTROY:
-				if (!ssyncd_process_object_destroy_record(ssyncd, player_id, player, &ctx)) { return; }
-				break;
-			case SSYNC_RECORD_TYPE_OBJ_UPDATE:
-				if (!ssyncd_process_object_update_record(ssyncd, player_id, player, &ctx, &msg_stream)) { return; }
-				break;
-			default: return;
+			case SSYNC_RECORD_TYPE_SNAPSHOT_INFO: {
+				if (!ssync_process_snapshot_info_record(&ctx)) {
+					goto end;
+				}
+
+				if (
+					player->endpoint.last_acked_snapshot != NULL
+					&&
+					player->endpoint.last_acked_snapshot->remote != NULL
+				) {
+					ssync_release_after(
+						&ssyncd->snapshot_pool,
+						player->endpoint.last_acked_snapshot->remote
+					);
+				}
+			} break;
+			case SSYNC_RECORD_TYPE_OBJ_CREATE: {
+				ssync_obj_create_record_t record;
+				const ssync_obj_t* obj;
+				if (!ssync_process_process_object_create_record(&ctx, &record, &obj)) {
+					goto end;
+				}
+
+				if (record.id.bin != player->obj_id_bin) {
+					ssync_discard_incoming_packet(&ctx);
+					goto end;
+				}
+
+				bhash_alloc_result_t alloc_result = bhash_alloc(&ssyncd->objects, record.id);
+				if (alloc_result.is_new) {
+					ssyncd->objects.keys[alloc_result.index] = record.id;
+					ssyncd->objects.values[alloc_result.index] = (ssyncd_obj_info_t){
+						.authority = player_id,
+						.created_at = (ssync_timestamp_t)(ssyncd->current_time_s * 1000.0),
+						.flags = record.flags,
+					};
+					ssync_copy_obj(
+						&ssyncd->objects.values[alloc_result.index].data,
+						obj,
+						ssyncd
+					);
+				}
+			} break;
+			case SSYNC_RECORD_TYPE_OBJ_DESTROY: {
+				ssync_obj_destroy_record_t record;
+				if (!ssync_process_process_object_destroy_record(&ctx, &record)) {
+					goto end;
+				}
+
+				ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, record.id);
+				if (obj_info != NULL) {
+					if (obj_info->authority == player_id) {
+						ssync_cleanup_obj(&obj_info->data, ssyncd);
+						bhash_remove(&ssyncd->objects, record.id);
+					} else {
+						ssync_discard_incoming_packet(&ctx);
+						goto end;
+					}
+				}
+			} break;
+			case SSYNC_RECORD_TYPE_OBJ_UPDATE: {
+				ssync_net_id_t id;
+				ssync_obj_t* data;
+				if (!ssync_process_object_update_record(&ctx, &id, &data)) {
+					goto end;
+				}
+
+				ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, id);
+				if (obj_info == NULL || obj_info->authority != player_id) {
+						ssync_discard_incoming_packet(&ctx);
+						goto end;
+				}
+				ssync_copy_obj(&obj_info->data, data, ssyncd);
+			} break;
+			default:
+				ssync_discard_incoming_packet(&ctx);
+				goto end;
 		}
 	}
+end:
 
-	if (ssyncd->incoming_snapshot != NULL) {
-		ssync_archive_snapshot(&player->incoming_archive, ssyncd->incoming_snapshot);
-		ssyncd->incoming_snapshot = NULL;
-	}
+	ssync_end_incoming_packet(&ctx);
 }
 
 void

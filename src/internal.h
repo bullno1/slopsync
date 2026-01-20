@@ -75,7 +75,7 @@ typedef struct ssync_snapshot_s ssync_snapshot_t;
 
 struct ssync_snapshot_s {
 	ssync_snapshot_t* next;
-	const ssync_snapshot_t* remote;
+	ssync_snapshot_t* remote;
 	ssync_timestamp_t timestamp;
 
 	BHASH_TABLE(ssync_net_id_t, ssync_obj_t) objects;
@@ -121,6 +121,52 @@ typedef struct {
 	bsv_out_t bsv;
 	size_t count;
 } ssync_bsv_count_t;
+
+typedef struct {
+	ssync_snapshot_pool_t* snapshot_pool;
+	size_t max_message_size;
+	const ssync_obj_schema_t* schema;
+	void* record_buf;
+	void* memctx;
+} ssync_endpoint_config_t;
+
+typedef struct {
+	const ssync_endpoint_config_t* config;
+
+	ssync_snapshot_t* last_acked_snapshot;
+	ssync_snapshot_pool_t incoming_archive;
+	ssync_snapshot_pool_t outgoing_archive;
+} ssync_endpoint_t;
+
+typedef struct {
+	ssync_endpoint_t* endpoint;
+
+	ssync_snapshot_t* snapshot;
+	const ssync_snapshot_t* base_snapshot;
+	ssync_snapshot_t* tmp_snapshot;
+
+	bitstream_out_t* packet_stream;
+
+	ssync_timestamp_t current_time_ms;
+
+	bool has_space;
+} ssync_outgoing_snapshot_ctx_t;
+
+typedef struct {
+	ssync_endpoint_t* endpoint;
+
+	bitstream_in_t* packet_stream;
+	bsv_ctx_t* packet_bsv;
+
+	ssync_snapshot_t* incoming_snapshot;
+	bool can_read;
+} ssync_incoming_packet_ctx_t;
+
+typedef struct {
+	bitstream_out_t stream;
+	bsv_ctx_t bsv;
+	ssync_bsv_out_t bsv_out;
+} ssync_record_ctx_t;
 
 extern void*
 ssync_host_realloc(void* ptr, size_t size, void* ctx);
@@ -732,6 +778,423 @@ ssync_read_obj_update(
 
 		if (previous_has_prop_group) { previous_props += num_props; }
 	}
+
+	return true;
+}
+
+// }}}
+
+// Endpoint {{{
+
+static inline void
+ssync_reinit_endpoint(ssync_endpoint_t* endpoint, const ssync_endpoint_config_t* config) {
+	endpoint->config = config;
+	ssync_reinit_snapshot_pool(&endpoint->incoming_archive, config->memctx);
+	ssync_reinit_snapshot_pool(&endpoint->outgoing_archive, config->memctx);
+}
+
+static inline void
+ssync_cleanup_endpoint(ssync_endpoint_t* endpoint) {
+	ssync_release_archive(endpoint->config->snapshot_pool, &endpoint->incoming_archive);
+	ssync_release_archive(endpoint->config->snapshot_pool, &endpoint->outgoing_archive);
+	endpoint->last_acked_snapshot = NULL;
+}
+
+static inline void
+ssync_prepare_record_buf(
+	ssync_record_ctx_t* record,
+	ssync_outgoing_snapshot_ctx_t* ctx
+) {
+	record->stream = (bitstream_out_t){
+		.data = ctx->endpoint->config->record_buf,
+		.num_bytes = ctx->endpoint->config->max_message_size,
+	};
+	record->bsv = (bsv_ctx_t){
+		.out = ssync_init_bsv_out(&record->bsv_out, &record->stream),
+	};
+}
+
+static inline void
+ssync_begin_outgoing_snapshot(
+	ssync_outgoing_snapshot_ctx_t* ctx,
+	ssync_endpoint_t* endpoint,
+	ssync_timestamp_t current_time_ms,
+	bitstream_out_t* out_stream,
+	bsv_ctx_t* out_bsv
+) {
+	ssync_snapshot_info_record_t snapshot_info = {
+		.current_time = current_time_ms,
+	};
+	ssync_snapshot_t* remote_snapshot = endpoint->incoming_archive.next;
+	if (remote_snapshot != NULL) {
+		snapshot_info.last_received = remote_snapshot->timestamp;
+	}
+	ssync_write_record_type(out_stream, SSYNC_RECORD_TYPE_SNAPSHOT_INFO);
+	bsv_ssync_snapshot_info_record(out_bsv, &snapshot_info);
+
+	ssync_snapshot_t* snapshot = ssync_acquire_snapshot(
+		endpoint->config->snapshot_pool,
+		current_time_ms,
+		endpoint->config->memctx
+	);
+	snapshot->remote = remote_snapshot;
+
+	const ssync_snapshot_t* base_snapshot = endpoint->last_acked_snapshot;
+	ssync_snapshot_t* tmp_snapshot = NULL;
+	if (base_snapshot == NULL) {
+		base_snapshot = tmp_snapshot = ssync_acquire_snapshot(
+			endpoint->config->snapshot_pool,
+			0, endpoint->config->memctx
+		);
+	}
+
+	*ctx = (ssync_outgoing_snapshot_ctx_t){
+		.endpoint = endpoint,
+
+		.packet_stream = out_stream,
+
+		.has_space = true,
+		.current_time_ms = current_time_ms,
+		.snapshot = snapshot,
+		.base_snapshot = base_snapshot,
+		.tmp_snapshot = tmp_snapshot,
+	};
+}
+
+static inline void
+ssync_end_outgoing_snapshot(ssync_outgoing_snapshot_ctx_t* ctx) {
+	// Find all destroyed (omitted) objects
+	bhash_index_t num_snapshotted_objects = bhash_len(&ctx->base_snapshot->objects);
+	for (bhash_index_t i = 0; i < num_snapshotted_objects; ++i) {
+		ssync_net_id_t id = ctx->base_snapshot->objects.keys[i];
+		if (bhash_has(&ctx->snapshot->objects, id)) { continue; }
+
+		if (ctx->has_space) {
+			ssync_record_ctx_t buf;
+			ssync_prepare_record_buf(&buf, ctx);
+
+			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_DESTROY);
+			ssync_obj_destroy_record_t record = {
+				.id = id,
+				.timestamp = ctx->current_time_ms,
+			};
+			bsv_ssync_obj_destroy_record(&buf.bsv, &record);
+
+			// Try appending to the packet
+			ctx->has_space &= bitstream_append(ctx->packet_stream, &buf.stream);
+		}
+
+		if (!ctx->has_space) {
+			// Put an empty object into the snapshot if not written so we
+			// will try resending destruction data in the next snapshot
+			ssync_obj_t empty_obj = { 0 };
+			bhash_put(&ctx->snapshot->objects, id, empty_obj);
+		}
+	}
+
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	ssync_archive_snapshot(&endpoint->outgoing_archive, ctx->snapshot);
+	if (ctx->tmp_snapshot != NULL) {
+		ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->tmp_snapshot);
+	}
+}
+
+static inline void
+ssync_add_outgoing_obj(
+	ssync_outgoing_snapshot_ctx_t* ctx,
+	ssync_timestamp_t created_at,
+	ssync_obj_flags_t flags,
+	ssync_net_id_t obj_id,
+	const ssync_obj_t* obj
+) {
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	const ssync_endpoint_config_t* config = endpoint->config;
+	const ssync_obj_t* base_obj = bhash_get_value(&ctx->base_snapshot->objects, obj_id);
+
+	if (base_obj == NULL) {  // New obj
+		if (ctx->has_space) {
+			ssync_record_ctx_t buf;
+			ssync_prepare_record_buf(&buf, ctx);
+
+			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_CREATE);
+			ssync_obj_create_record_t record = {
+				.id = obj_id,
+				.timestamp = created_at,
+				.flags = flags,
+			};
+			bsv_ssync_obj_create_record(&buf.bsv, &record);
+			ssync_write_bitmask(
+				&buf.stream,
+				obj->prop_group_mask,
+				config->schema->num_prop_groups
+			);
+			int num_props = (int)barray_len(obj->props);
+			for (int i = 0; i < num_props; ++i) {
+				bsv_auto(&buf.bsv, &obj->props[i]);
+			}
+
+			ctx->has_space &= bitstream_append(ctx->packet_stream, &buf.stream);
+		}
+
+		if (ctx->has_space) {
+			ssync_obj_t copy = { 0 };
+			ssync_copy_obj(&copy, obj, config->memctx);
+			bhash_put(&ctx->snapshot->objects, obj_id, copy);
+		}
+	} else {  // Existing obj
+		if (
+			ctx->has_space
+			&&
+			!ssync_obj_equal(config->schema, obj, base_obj)
+		) {
+			ssync_record_ctx_t buf;
+			ssync_prepare_record_buf(&buf, ctx);
+
+			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_UPDATE);
+			bsv_ssync_net_id(&buf.bsv, &obj_id);
+			ssync_write_obj_update(
+				&buf.bsv, &buf.stream,
+				config->schema, obj, base_obj
+			);
+
+			ctx->has_space &= bitstream_append(ctx->packet_stream, &buf.stream);
+		}
+
+		ssync_obj_t copy = { 0 };
+		if (ctx->has_space) {
+			ssync_copy_obj(&copy, obj, config->memctx);
+		} else {
+			ssync_copy_obj(&copy, base_obj, config->memctx);
+		}
+		bhash_put(&ctx->snapshot->objects, obj_id, copy);
+	}
+}
+
+static inline void
+ssync_begin_incoming_packet(
+	ssync_incoming_packet_ctx_t* ctx,
+	ssync_endpoint_t* endpoint,
+	bitstream_in_t* in_stream,
+	bsv_ctx_t* in_bsv
+) {
+	*ctx = (ssync_incoming_packet_ctx_t){
+		.endpoint = endpoint,
+
+		.packet_stream = in_stream,
+		.packet_bsv = in_bsv,
+
+		.can_read = true,
+	};
+}
+
+static inline void
+ssync_end_incoming_packet(ssync_incoming_packet_ctx_t* ctx) {
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	if (ctx->incoming_snapshot != NULL) {
+		if (ctx->can_read) {
+			ssync_archive_snapshot(&endpoint->incoming_archive, ctx->incoming_snapshot);
+		} else {
+			ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->incoming_snapshot);
+		}
+	}
+}
+
+static inline bool
+ssync_discard_incoming_packet(ssync_incoming_packet_ctx_t* ctx) {
+	return ctx->can_read = false;
+}
+
+static inline bool
+ssync_process_snapshot_info_record(ssync_incoming_packet_ctx_t* ctx) {
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	const ssync_endpoint_config_t* config = endpoint->config;
+
+	ssync_snapshot_info_record_t record;
+	if (bsv_ssync_snapshot_info_record(ctx->packet_bsv, &record) != BSV_OK) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_timestamp_t last_snapshot_time = 0;
+	if (endpoint->incoming_archive.next != NULL) {
+		last_snapshot_time = endpoint->incoming_archive.next->timestamp;
+	}
+	if (record.current_time <= last_snapshot_time) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	if (ctx->incoming_snapshot == NULL) {
+		ctx->incoming_snapshot = ssync_acquire_snapshot(
+			config->snapshot_pool,
+			record.current_time,
+			config->memctx
+		);
+	} else {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	endpoint->last_acked_snapshot = ssync_ack_snapshot(
+		&endpoint->outgoing_archive, config->snapshot_pool, record.last_received
+	);
+	if (
+		endpoint->last_acked_snapshot != NULL
+		&&
+		endpoint->last_acked_snapshot->remote != NULL
+	) {
+		// Make copies of every existing object so that those without updates
+		// appear unchanged
+		const ssync_snapshot_t* base_snapshot = endpoint->last_acked_snapshot->remote;
+		for (bhash_index_t i = 0; i < bhash_len(&base_snapshot->objects); ++i) {
+			ssync_net_id_t id = base_snapshot->objects.keys[i];
+			const ssync_obj_t* obj = &base_snapshot->objects.values[i];
+			ssync_obj_t copy = { 0 };
+			ssync_copy_obj(&copy, obj, config->memctx);
+			bhash_put(&ctx->incoming_snapshot->objects, id, copy);
+		}
+	}
+
+	return true;
+}
+
+static inline bool
+ssync_process_process_object_create_record(
+	ssync_incoming_packet_ctx_t* ctx,
+	ssync_obj_create_record_t* record_out,
+	const ssync_obj_t** data_out
+) {
+	if (ctx->incoming_snapshot == NULL) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_obj_create_record_t record;
+	if (bsv_ssync_obj_create_record(ctx->packet_bsv, &record) != BSV_OK) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	bhash_alloc_result_t alloc_result = bhash_alloc(&ctx->incoming_snapshot->objects, record.id);
+	if (!alloc_result.is_new) {  // Duplicated entry
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	// Write a dummy entry first so there is no problem during cleanup
+	ctx->incoming_snapshot->objects.keys[alloc_result.index] = record.id;
+	ctx->incoming_snapshot->objects.values[alloc_result.index] = (ssync_obj_t){ 0 };
+
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	const ssync_endpoint_config_t* config = endpoint->config;
+	const ssync_obj_schema_t* schema = config->schema;
+
+	ssync_obj_t obj = { 0 };
+	int num_prop_groups = schema->num_prop_groups;
+	if (!ssync_read_bitmask(
+		ctx->packet_stream,
+		&obj.prop_group_mask,
+		num_prop_groups
+	)) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	for (
+		int prop_group_index = 0;
+		prop_group_index < num_prop_groups;
+		++prop_group_index
+	) {
+		if (!ssync_obj_has_prop_group(&obj, prop_group_index)) { continue; }
+
+		int num_props = schema->prop_groups[prop_group_index].num_props;
+		for (int prop_index = 0; prop_index < num_props; ++prop_index) {
+			ssync_prop_t prop;
+			if (bsv_auto(ctx->packet_bsv, &prop) != BSV_OK) {
+				ssync_cleanup_obj(&obj, config->memctx);
+				return ssync_discard_incoming_packet(ctx);
+			}
+
+			barray_push(obj.props, prop, config->memctx);
+		}
+	}
+
+	ctx->incoming_snapshot->objects.values[alloc_result.index] = obj;
+
+	if (record_out != NULL) { *record_out = record; }
+	if (data_out != NULL) {
+		*data_out = &ctx->incoming_snapshot->objects.values[alloc_result.index];
+	}
+
+	return true;
+}
+
+static inline bool
+ssync_process_process_object_destroy_record(
+	ssync_incoming_packet_ctx_t* ctx,
+	ssync_obj_destroy_record_t* record_out
+) {
+	if (ctx->incoming_snapshot == NULL) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_obj_destroy_record_t record;
+	if (bsv_ssync_obj_destroy_record(ctx->packet_bsv, &record) != BSV_OK) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	const ssync_endpoint_config_t* config = endpoint->config;
+
+	bhash_index_t index = bhash_remove(&ctx->incoming_snapshot->objects, record.id);
+	if (!bhash_is_valid(index)) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+	ssync_cleanup_obj(&ctx->incoming_snapshot->objects.values[index], config->memctx);
+
+	if (record_out != NULL) { *record_out = record; }
+
+	return true;
+}
+
+static inline bool
+ssync_process_object_update_record(
+	ssync_incoming_packet_ctx_t* ctx,
+	ssync_net_id_t* id_out,
+	ssync_obj_t** data_out
+) {
+	if (ctx->incoming_snapshot == NULL) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_net_id_t id;
+	if (bsv_ssync_net_id(ctx->packet_bsv, &id) != BSV_OK) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_endpoint_t* endpoint = ctx->endpoint;
+	const ssync_endpoint_config_t* config = endpoint->config;
+
+	const ssync_obj_t* base_obj = NULL;
+	if (
+		endpoint->last_acked_snapshot != NULL
+		&&
+		endpoint->last_acked_snapshot->remote != NULL
+	) {
+		base_obj = bhash_get_value(&endpoint->last_acked_snapshot->remote->objects, id);
+	} else {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	ssync_obj_t* updated_obj = bhash_get_value(&ctx->incoming_snapshot->objects, id);
+	if (
+		updated_obj == NULL
+		||
+		!ssync_read_obj_update(
+			ctx->packet_bsv,
+			ctx->packet_stream,
+			config->memctx, config->schema,
+			base_obj, updated_obj
+		)
+	) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
+	if (id_out != NULL) { *id_out = id; }
+	if (data_out != NULL) { *data_out = updated_obj; }
 
 	return true;
 }
