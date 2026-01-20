@@ -317,8 +317,6 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 				if (!ssync_process_snapshot_info_record(&ctx)) {
 					goto end;
 				}
-
-				// TODO: cleanup
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_CREATE: {
 				ssync_obj_create_record_t record;
@@ -384,7 +382,7 @@ ssync_update(ssync_t* ssync, double dt) {
 
 		if (ssync->simulation_time_s == 0.0) { continue; }
 		ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0);
-		const ssync_snapshot_t* prev_snapshot = next_snapshot->next;
+		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
 		// Execute queued creations
 		int num_created_objects = (int)barray_len(ssync->created_objects);
@@ -453,6 +451,22 @@ ssync_update(ssync_t* ssync, double dt) {
 				.interpolant = interpolant,
 			};
 			ssync->config.sync(ssync->config.userdata, &ctx, id);
+		}
+
+		// Prune old snapshots
+		if (
+			ssync->endpoint.last_acked_snapshot != NULL
+			&&
+			ssync->endpoint.last_acked_snapshot->remote != NULL
+		) {
+			// A snapshot is old enough if:
+			//
+			// * It is older than the base snapshot used for delta compression
+			// * It is older than the snapshot used for interpolation
+			const ssync_snapshot_t* base_snapshot = ssync->endpoint.last_acked_snapshot->remote;
+			if (prev_snapshot->timestamp <= base_snapshot->timestamp) {
+				ssync_release_after(&ssync->snapshot_pool, prev_snapshot);
+			}
 		}
 	}
 
