@@ -9,6 +9,7 @@
 #include <bhash.h>
 #include <math.h>
 #include "internal.h"
+#include "base64.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -295,7 +296,7 @@ ssync_do_reinit(ssync_t* ssync, const ssync_config_t* config) {
 	ssync_bsv_count_t count_stream;
 	bsv_ctx_t ctx = { .out = ssync_init_bsv_count(&count_stream) };
 	bsv_ssync_obj_schema(&ctx, &ssync->schema);
-	ssync->schema_size = count_stream.count;
+	ssync->schema_size = base64_encoded_size(count_stream.count);
 }
 
 ssync_t*
@@ -341,10 +342,15 @@ ssync_cleanup(ssync_t* ssync) {
 
 void
 ssync_write_schema(ssync_t* ssync, void* out) {
-	bitstream_out_t out_stream = { .data = out, .num_bytes = ssync->schema_size };
+	size_t raw_size = base64_decoded_size(ssync->schema_size);
+	void* tmp_buf = ssync_malloc(&ssync->config, raw_size);
+	bitstream_out_t out_stream = { .data = tmp_buf, .num_bytes = raw_size };
 	ssync_bsv_out_t bsv_out;
 	bsv_ctx_t ctx = { .out = ssync_init_bsv_out(&bsv_out, &out_stream) };
 	bsv_ssync_obj_schema(&ctx, &ssync->schema);
+
+	base64_encode(tmp_buf, raw_size, out);
+	ssync_free(&ssync->config, tmp_buf);
 }
 
 ssync_info_t
