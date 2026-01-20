@@ -138,6 +138,8 @@ ssyncd_init(const ssyncd_config_t* config) {
 		.snapshot_pool = &ssd->snapshot_pool
 	};
 
+	ssync_reinit_snapshot_pool(&ssd->snapshot_pool, ssd);
+
 	bhash_config_t hconfig = bhash_config_default();
 	hconfig.memctx = ssd;
 	bhash_init(&ssd->objects, hconfig);

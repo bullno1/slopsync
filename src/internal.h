@@ -706,6 +706,12 @@ ssync_write_obj_update(
 	}
 }
 
+static inline void
+ssync_reset_obj(ssync_obj_t* obj) {
+	obj->prop_group_mask = 0;
+	barray_clear(obj->props);
+}
+
 static inline bool
 ssync_read_obj_update(
 	bsv_ctx_t* bsv,
@@ -720,8 +726,7 @@ ssync_read_obj_update(
 		return false;
 	}
 
-	barray_clear(current_obj->props);
-	current_obj->prop_group_mask = 0;
+	ssync_reset_obj(current_obj);
 
 	const ssync_prop_t* previous_props = previous_obj->props;
 
