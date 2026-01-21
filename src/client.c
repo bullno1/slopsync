@@ -568,6 +568,11 @@ ssync_mode(ssync_ctx_t* ctx) {
 	return ctx->mode;
 }
 
+void*
+ssync_ctx_userdata(ssync_ctx_t* ctx) {
+	return ctx->ssync->config.userdata;
+}
+
 bool
 ssync_prop_group(ssync_ctx_t* ctx, ssync_local_id_t prop_group_id) {
 	ssync_t* ssync = ctx->ssync;

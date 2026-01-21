@@ -129,6 +129,9 @@ ssync_destroy(ssync_t* ssync, ssync_net_id_t obj_id);
 ssync_mode_t
 ssync_mode(ssync_ctx_t* ctx);
 
+void*
+ssync_ctx_userdata(ssync_ctx_t* ctx);
+
 void
 ssync_handover(ssync_t* ssync, ssync_net_id_t obj_id, ssync_player_id_t player);
 
