@@ -1,5 +1,6 @@
 // vim: set foldmethod=marker foldlevel=0:
 #include <slopsync/server.h>
+#include <blog.h>
 #include "internal.h"
 #include "base64.h"
 
@@ -108,6 +109,7 @@ ssyncd_init(const ssyncd_config_t* config) {
 	void* raw_data = ssyncd_malloc(config, raw_size);
 	if (!base64_decode(config->obj_schema.data, config->obj_schema.size, raw_data)) {
 		ssyncd_free(config, raw_data);
+		BLOG_ERROR("Base64 decoding failed");
 		return NULL;
 	}
 
@@ -117,11 +119,12 @@ ssyncd_init(const ssyncd_config_t* config) {
 	bsv_ctx_t ctx = { .in = ssync_init_bsv_in(&bsv_in, &in_stream) };
 	if (bsv_ssync_obj_schema(&ctx, &schema) != BSV_OK) {
 		ssyncd_free(config, raw_data);
+		BLOG_ERROR("Schema decoding failed");
 		return NULL;
 	}
 	ssyncd_free(config, raw_data);
 
-	ssyncd_t* ssd = ssyncd_malloc(config, sizeof(ssyncd_t*));
+	ssyncd_t* ssd = ssyncd_malloc(config, sizeof(ssyncd_t));
 	*ssd = (ssyncd_t){
 		.config = *config,
 		.players = ssyncd_malloc(config, sizeof(ssyncd_player_info_t) * config->max_num_players),

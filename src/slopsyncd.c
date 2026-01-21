@@ -1,5 +1,7 @@
 #include "slopnetd.h"
 #include <slopsync/server.h>
+#include <blog.h>
+#include <string.h>
 
 typedef struct {
 	snetd_env_t* env;
@@ -19,8 +21,38 @@ ssyncd_send(void* userdata, int receiver, ssync_blob_t message, bool reliable) {
 	snetd_send(ssd->env, receiver, message.data, message.size, reliable);
 }
 
+static void
+blog_snetd(const blog_ctx_t* ctx, blog_str_t msg, void* userdata) {
+	char buf[2048];
+	const char* level = "";
+	switch (ctx->level) {
+		case BLOG_LEVEL_TRACE: level = "TRACE"; break;
+		case BLOG_LEVEL_DEBUG: level = "DEBUG"; break;
+		case BLOG_LEVEL_INFO: level = "INFO"; break;
+		case BLOG_LEVEL_WARN: level = "WARN"; break;
+		case BLOG_LEVEL_ERROR: level = "ERROR"; break;
+		case BLOG_LEVEL_FATAL: level = "FATAL";  break;
+	}
+	snprintf(
+		buf, sizeof(buf),
+		"%s:%.*s:%d: %.*s",
+		level,
+		ctx->file.len, ctx->file.data,
+		ctx->line,
+		msg.len, msg.data
+	);
+
+	snetd_log(userdata, buf);
+}
+
 static void*
 init(snetd_env_t* env, const snetd_game_options_t* options) {
+	blog_init(&(blog_options_t){
+		.current_filename = __FILE__,
+		.current_depth_in_project = 2,
+	});
+	blog_add_logger(BLOG_LEVEL_DEBUG, blog_snetd, env);
+
 	slopsyncd_t* ssd = snetd_malloc(env, sizeof(slopsyncd_t));
 	ssyncd_config_t config = {
 		.max_num_players = options->max_num_players,
@@ -29,14 +61,21 @@ init(snetd_env_t* env, const snetd_game_options_t* options) {
 		.logic_tick_rate = 30,
 		.realloc = ssyncd_realloc,
 		.send_msg = ssyncd_send,
+		.obj_schema = {
+			.data = options->creation_data,
+			.size = options->creation_data ? strlen(options->creation_data) : 0,
+		},
 		.userdata = ssd,
 	};
 	*ssd = (slopsyncd_t){
 		.env = env,
-		.ssd = ssyncd_init(&config),
 		.dt = 1.0 / (double)config.logic_tick_rate,
 	};
-	if (ssd->ssd == NULL) { snetd_terminate(env); }
+	ssd->ssd = ssyncd_init(&config);
+	if (ssd->ssd == NULL) {
+		BLOG_ERROR("Failed to initialize");
+		snetd_terminate(env);
+	}
 
 	return ssd;
 }
@@ -88,3 +127,6 @@ static snetd_t ssyncd = {
 };
 
 SNETD_ENTRY(ssyncd)
+
+#define BLIB_IMPLEMENTATION
+#include <blog.h>
