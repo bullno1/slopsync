@@ -58,7 +58,9 @@ typedef void (*ssync_send_msg_fn_t)(
 
 typedef struct {
 	ssync_player_id_t player_id;
-	ssync_timestamp_t current_time;
+	ssync_timestamp_t client_time;
+	ssync_timestamp_t server_time;
+	ssync_timestamp_t interp_time;
 	ssync_timestamp_t net_tick_rate;
 	ssync_timestamp_t logic_tick_rate;
 	size_t schema_size;

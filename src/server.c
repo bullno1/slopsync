@@ -173,6 +173,8 @@ ssyncd_add_player(ssyncd_t* ssyncd, int id, const char* username) {
 	player->username = username;
 	ssync_reinit_endpoint(&player->endpoint, &ssyncd->endpoint_config);
 
+	BLOG_INFO("%s joined with id: %d and obj bin: %d", username, id, player->obj_id_bin);
+
 	bitstream_out_t packet_out_stream = {
 		.data = ssyncd->outgoing_packet_buf,
 		.num_bytes = ssyncd->config.max_message_size,
@@ -194,6 +196,7 @@ ssyncd_add_player(ssyncd_t* ssyncd, int id, const char* username) {
 
 	ssyncd_write_snapshot(ssyncd, id, player, &packet_out_stream, &bsv_packet_ctx);
 
+	ssync_end_packet(&packet_out_stream);
 	ssync_blob_t msg = {
 		.data = ssyncd->outgoing_packet_buf,
 		.size = (packet_out_stream.bit_pos + 7) / 8,
@@ -205,6 +208,8 @@ ssyncd_add_player(ssyncd_t* ssyncd, int id, const char* username) {
 void
 ssyncd_remove_player(ssyncd_t* ssyncd, int id) {
 	ssyncd_player_info_t* player = &ssyncd->players[id];
+	BLOG_INFO("%s left", player->username);
+
 	player->username = NULL;
 	ssync_cleanup_endpoint(&player->endpoint);
 	// TODO: destroy observers
@@ -231,6 +236,8 @@ ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
 		}
 
 		switch ((ssync_record_type_t)record_type) {
+			case SSYNC_RECORD_TYPE_END:
+				goto end;
 			case SSYNC_RECORD_TYPE_SNAPSHOT_INFO: {
 				if (!ssync_process_snapshot_info_record(&ctx)) {
 					goto end;
@@ -336,6 +343,7 @@ ssyncd_broadcast(ssyncd_t* ssyncd) {
 		};
 		ssyncd_write_snapshot(ssyncd, i, player, &packet_out_stream, &bsv_packet_ctx);
 
+		ssync_end_packet(&packet_out_stream);
 		ssync_blob_t msg = {
 			.data = ssyncd->outgoing_packet_buf,
 			.size = (packet_out_stream.bit_pos + 7) / 8,

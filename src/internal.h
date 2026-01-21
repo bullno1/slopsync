@@ -8,6 +8,7 @@
 #include <barray.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <blog.h>
 #include "bitstream.h"
 #include "jtckdint.h"
 
@@ -23,7 +24,8 @@ typedef SSYNC_PROP_GROUP_MASK_TYPE ssync_prop_group_mask_t;
 typedef SSYNC_PROP_MASK_TYPE ssync_prop_mask_t;
 
 typedef enum {
-	SSYNC_RECORD_TYPE_INIT = 0,
+	SSYNC_RECORD_TYPE_END = 0,
+	SSYNC_RECORD_TYPE_INIT,
 	SSYNC_RECORD_TYPE_SNAPSHOT_INFO,
 	SSYNC_RECORD_TYPE_OBJ_CREATE,
 	SSYNC_RECORD_TYPE_OBJ_UPDATE,
@@ -256,7 +258,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_timestamp_t timestamp,
 static inline void
 ssync_release_snapshot(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) {
 	snapshot->next = pool->next;
-	pool->next = snapshot->next;
+	pool->next = snapshot;
 }
 
 static inline void
@@ -280,6 +282,7 @@ ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapsho
 	while (*itr != NULL) {
 		if ((*itr)->timestamp == snapshot->timestamp) {
 			// Duplicate timestamp found, do not insert
+			BLOG_WARN("Dupe!");
 			return false;
 		}
 
@@ -338,8 +341,12 @@ ssync_find_snapshot_pair(const ssync_snapshot_pool_t* archive, ssync_timestamp_t
 		const ssync_snapshot_t* a = itr;
 		const ssync_snapshot_t* b = itr->next;
 
-		if (b->timestamp <= timestamp && timestamp < a->timestamp) {
+		if (b->timestamp <= timestamp && timestamp <= a->timestamp) {
 			return a;
+		}
+
+		if (timestamp > a->timestamp) {
+			return NULL;
 		}
 
 		itr = itr->next;
@@ -365,41 +372,31 @@ ssync_init_bsv_count(ssync_bsv_count_t* bsv_count);
 
 // Records {{{
 
-#if defined(_MSC_VER)
+#if defined(__GNUC__) || defined(__clang__)
+#define BITS_USE_CLZ
+#elif defined(_MSC_VER)
 #include <intrin.h>
+#pragma intrinsic(__lzcnt64)
+#define BITS_USE_LZCNT
 #endif
 
 static inline size_t
 bits_required(size_t count) {
-    if (count <= 1) { return 0; }
+	if (count <= 1) { return 0; }
 
-    size_t v = count - 1;
+	unsigned long long val = (unsigned long long)count - 1;
 
-#if defined(_MSC_VER)
-
-    unsigned long index;
-
-    #if defined(_M_X64) || defined(_M_ARM64)
-        _BitScanReverse64(&index, (unsigned __int64)v);
-        return (size_t)index + 1;
-    #else
-        _BitScanReverse(&index, (unsigned long)v);
-        return (size_t)index + 1;
-    #endif
-
-#elif defined(__GNUC__) || defined(__clang__)
-
-    return (sizeof(size_t) * 8) - __builtin_clz(v);
-
+#if defined(BITS_USE_CLZ)
+	return (sizeof(unsigned long long) * 8) - __builtin_clzll(val);
+#elif defined(BITS_USE_LZCNT)
+	return 64 - __lzcnt64(val);
 #else
-
-    size_t bits = 0;
-	while (v) {
+	size_t bits = 0;
+	while (val != 0) {
 		bits++;
-		v >>= 1;
+		val >>= 1;
 	}
 	return bits;
-
 #endif
 }
 
@@ -486,6 +483,7 @@ bsv_ssync_snapshot_info_record(bsv_ctx_t* ctx, ssync_snapshot_info_record_t* rec
 
 static inline bsv_status_t
 bsv_ssync_init_record(bsv_ctx_t* ctx, ssync_init_record_t* rec) {
+	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->current_time));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->player_id));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->net_tick_rate));
 	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->logic_tick_rate));
@@ -785,6 +783,13 @@ ssync_read_obj_update(
 	}
 
 	return true;
+}
+
+static inline void
+ssync_end_packet(bitstream_out_t* packet_stream) {
+	if (packet_stream->bit_pos % 8 != 0) {
+		ssync_write_record_type(packet_stream, SSYNC_RECORD_TYPE_END);
+	}
 }
 
 // }}}

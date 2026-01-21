@@ -123,7 +123,6 @@ ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 		return false;
 	}
 
-	BLOG_INFO("Received init record");
 	ssync->init_record = init_record;
 	ssync->logic_tick_interval = 1.0 / (double)init_record.logic_tick_rate;
 	ssync->net_tick_interval = 1.0 / (double)init_record.net_tick_rate;
@@ -132,6 +131,14 @@ ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync->interpolation_delay = (ssync_timestamp_t)(ssync->config.interpolation_ratio / (double)init_record.net_tick_rate * 1000.0);
 	ssync->logic_tick_accumulator = 0.0;
 	ssync->net_tick_accumulator = 0.0;
+	BLOG_INFO(
+		"Received init record: logic_tick_rate = %d, net_tick_rate = %d, current_time_s = %f, player_id = %d, obj_id_bin = %d",
+		init_record.logic_tick_rate,
+		init_record.net_tick_rate,
+		ssync->current_time_s,
+		init_record.player_id,
+		init_record.obj_id_bin
+	);
 	return true;
 }
 
@@ -270,11 +277,18 @@ ssync_write_schema(ssync_t* ssync, void* out) {
 
 ssync_info_t
 ssync_info(ssync_t* ssync) {
+	ssync_timestamp_t server_time = 0;
+	if (ssync->endpoint.incoming_archive.next != NULL) {
+		server_time = ssync->endpoint.incoming_archive.next->timestamp;
+	}
+
 	return (ssync_info_t){
 		.player_id = ssync->init_record.player_id,
-		.current_time = ssync->current_time_ms,
 		.net_tick_rate = ssync->init_record.net_tick_rate,
 		.logic_tick_rate = ssync->init_record.logic_tick_rate,
+		.client_time = ssync->current_time_ms,
+		.interp_time = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0),
+		.server_time = server_time,
 		.schema_size = ssync->schema_size,
 	};
 }
@@ -307,6 +321,8 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 		}
 
 		switch ((ssync_record_type_t)record_type) {
+			case SSYNC_RECORD_TYPE_END:
+				goto end;
 			case SSYNC_RECORD_TYPE_INIT: {
 				if (!ssync_process_init_record(ssync, &packet_bsv)) {
 					ssync_discard_incoming_packet(&ctx);
@@ -363,13 +379,14 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync->current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 
 		const ssync_snapshot_t* next_snapshot = NULL;
+		ssync_timestamp_t simulation_time_ms;
 		if (ssync->simulation_time_s == 0.0) {
 			if (
 				ssync->endpoint.incoming_archive.next != NULL
 				&&
 				ssync->endpoint.incoming_archive.next->timestamp > ssync->interpolation_delay
 			) {
-				ssync_timestamp_t simulation_time_ms = ssync->endpoint.incoming_archive.next->timestamp - ssync->interpolation_delay;
+				simulation_time_ms = ssync->endpoint.incoming_archive.next->timestamp - ssync->interpolation_delay;
 				next_snapshot = ssync_find_snapshot_pair(&ssync->endpoint.incoming_archive, simulation_time_ms);
 				if (next_snapshot != NULL) {
 					ssync->simulation_time_s = (double)simulation_time_ms / 1000.0;
@@ -378,10 +395,11 @@ ssync_update(ssync_t* ssync, double dt) {
 			}
 		} else {
 			ssync->simulation_time_s += ssync->logic_tick_interval;
+			simulation_time_ms = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0);
+			next_snapshot = ssync_find_snapshot_pair(&ssync->endpoint.incoming_archive, simulation_time_ms);
 		}
 
-		if (ssync->simulation_time_s == 0.0) { continue; }
-		ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0);
+		if (next_snapshot == NULL) { continue; }
 		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
 		// Execute queued creations
@@ -520,7 +538,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync_cleanup_obj(&tmp_obj, ssync);
 		ssync_end_outgoing_snapshot(&snapshot_ctx);
 
-		// Send
+		ssync_end_packet(&packet_stream);
 		ssync_blob_t msg = {
 			.data = ssync->outgoing_packet_buf,
 			.size = (packet_stream.bit_pos + 7) / 8,
