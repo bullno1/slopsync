@@ -63,6 +63,8 @@ typedef struct {
 	ssync_timestamp_t interp_time;
 	ssync_timestamp_t net_tick_rate;
 	ssync_timestamp_t logic_tick_rate;
+	int num_incoming_snapshots;
+	int num_outgoing_snapshots;
 	size_t schema_size;
 } ssync_info_t;
 

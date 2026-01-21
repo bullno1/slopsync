@@ -290,6 +290,8 @@ ssync_info(ssync_t* ssync) {
 		.interp_time = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0),
 		.server_time = server_time,
 		.schema_size = ssync->schema_size,
+		.num_incoming_snapshots = ssync->endpoint.incoming_archive.count,
+		.num_outgoing_snapshots = ssync->endpoint.outgoing_archive.count,
 	};
 }
 
@@ -483,14 +485,18 @@ ssync_update(ssync_t* ssync, double dt) {
 			// * It is older than the snapshot used for interpolation
 			const ssync_snapshot_t* base_snapshot = ssync->endpoint.last_acked_snapshot->remote;
 			if (prev_snapshot->timestamp <= base_snapshot->timestamp) {
-				ssync_release_after(&ssync->snapshot_pool, prev_snapshot);
+				ssync_release_after(
+					&ssync->snapshot_pool,
+					&ssync->endpoint.incoming_archive,
+					prev_snapshot
+				);
 			}
 		}
 	}
 
 	// Send local objects
 	ssync->net_tick_accumulator += dt;
-	if (ssync->net_tick_accumulator > ssync->net_tick_interval) {
+	if (ssync->net_tick_accumulator >= ssync->net_tick_interval) {
 		ssync->net_tick_accumulator = fmod(ssync->net_tick_accumulator, ssync->net_tick_interval);
 
 		bitstream_out_t packet_stream = {

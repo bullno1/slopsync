@@ -250,6 +250,7 @@ ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
 				) {
 					ssync_release_after(
 						&ssyncd->snapshot_pool,
+						&player->endpoint.incoming_archive,
 						player->endpoint.last_acked_snapshot->remote
 					);
 				}

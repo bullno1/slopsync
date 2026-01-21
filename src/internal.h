@@ -85,6 +85,7 @@ struct ssync_snapshot_s {
 
 typedef struct {
 	ssync_snapshot_t* next;
+	int count;
 } ssync_snapshot_pool_t;
 
 typedef enum {
@@ -233,6 +234,7 @@ ssync_cleanup_snapshot_pool(ssync_snapshot_pool_t* pool, void* memctx) {
 		ssync_destroy_snapshot(itr, memctx);
 		itr = next;
 	}
+	pool->count = 0;
 }
 
 static inline ssync_snapshot_t*
@@ -241,6 +243,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_timestamp_t timestamp,
 	if (pool->next != NULL) {
 		snapshot = pool->next;
 		pool->next = snapshot->next;
+		pool->count -= 1;
 
 		ssync_clear_snapshot(snapshot, memctx);
 		bhash_clear(&snapshot->objects);
@@ -259,6 +262,7 @@ static inline void
 ssync_release_snapshot(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) {
 	snapshot->next = pool->next;
 	pool->next = snapshot;
+	pool->count += 1;
 }
 
 static inline void
@@ -272,6 +276,7 @@ ssync_release_archive(ssync_snapshot_pool_t* pool, ssync_snapshot_pool_t* archiv
 	}
 
 	archive->next = NULL;
+	archive->count = 0;
 }
 
 static inline bool
@@ -282,7 +287,6 @@ ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapsho
 	while (*itr != NULL) {
 		if ((*itr)->timestamp == snapshot->timestamp) {
 			// Duplicate timestamp found, do not insert
-			BLOG_WARN("Dupe!");
 			return false;
 		}
 
@@ -295,16 +299,18 @@ ssync_archive_snapshot(ssync_snapshot_pool_t* archive, ssync_snapshot_t* snapsho
 	// Insert the snapshot
 	snapshot->next = *itr;
 	*itr = snapshot;
+	archive->count += 1;
 	return true;
 }
 
 static inline void
-ssync_release_after(ssync_snapshot_pool_t* pool, ssync_snapshot_t* snapshot) {
+ssync_release_after(ssync_snapshot_pool_t* pool, ssync_snapshot_pool_t* from, ssync_snapshot_t* snapshot) {
     ssync_snapshot_t* itr = snapshot->next;
     while (itr != NULL) {
         ssync_snapshot_t* to_release = itr;
         itr = itr->next;
         ssync_release_snapshot(pool, to_release);
+		from->count -= 1;
     }
     snapshot->next = NULL;
 }
@@ -318,7 +324,7 @@ ssync_ack_snapshot(
 	ssync_snapshot_t* itr = archive->next;
 	while (itr != NULL) {
 		if (itr->timestamp == timestamp) {
-			ssync_release_after(pool, itr);
+			ssync_release_after(pool, archive, itr);
 			return itr;
 		}
 
@@ -903,7 +909,10 @@ ssync_end_outgoing_snapshot(ssync_outgoing_snapshot_ctx_t* ctx) {
 	}
 
 	ssync_endpoint_t* endpoint = ctx->endpoint;
-	ssync_archive_snapshot(&endpoint->outgoing_archive, ctx->snapshot);
+	if (!ssync_archive_snapshot(&endpoint->outgoing_archive, ctx->snapshot)) {
+		ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->snapshot);
+	}
+
 	if (ctx->tmp_snapshot != NULL) {
 		ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->tmp_snapshot);
 	}
@@ -1002,7 +1011,9 @@ ssync_end_incoming_packet(ssync_incoming_packet_ctx_t* ctx) {
 	ssync_endpoint_t* endpoint = ctx->endpoint;
 	if (ctx->incoming_snapshot != NULL) {
 		if (ctx->can_read) {
-			ssync_archive_snapshot(&endpoint->incoming_archive, ctx->incoming_snapshot);
+			if (!ssync_archive_snapshot(&endpoint->incoming_archive, ctx->incoming_snapshot)) {
+				ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->incoming_snapshot);
+			}
 		} else {
 			ssync_release_snapshot(endpoint->config->snapshot_pool, ctx->incoming_snapshot);
 		}
