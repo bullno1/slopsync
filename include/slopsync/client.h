@@ -3,6 +3,20 @@
 
 #include "shared.h"
 
+#define ssync_prop_any_int(CTX, PTR, FLAGS) \
+	_Generic(*(PTR), \
+		uint8_t: ssync_prop_u8, \
+		int8_t: ssync_prop_s8, \
+		uint16_t: ssync_prop_u16, \
+		int16_t: ssync_prop_s16, \
+		uint32_t: ssync_prop_u32, \
+		int32_t: ssync_prop_s32, \
+		uint64_t: ssync_prop_u64, \
+		int64_t: ssync_prop_int \
+	)(CTX, PTR, FLAGS)
+
+#define SSYNC_PROP_DEFAULT (ssync_prop_flags_t)(0)
+
 typedef struct ssync_s ssync_t;
 typedef uint64_t ssync_local_id_t;
 typedef struct ssync_ctx_s ssync_ctx_t;
