@@ -40,10 +40,8 @@ struct ssync_s {
 
 	uint16_t next_obj_id;
 
-	ssync_timestamp_t current_time_ms;
-	ssync_timestamp_t interpolation_delay;
 	double current_time_s;
-	double simulation_time_s;
+	double interpolation_delay_s;
 	double logic_tick_accumulator;
 	double net_tick_accumulator;
 	double logic_tick_interval;
@@ -126,9 +124,8 @@ ssync_process_init_record(ssync_t* ssync, bsv_ctx_t* ctx) {
 	ssync->init_record = init_record;
 	ssync->logic_tick_interval = 1.0 / (double)init_record.logic_tick_rate;
 	ssync->net_tick_interval = 1.0 / (double)init_record.net_tick_rate;
-	ssync->current_time_ms = init_record.current_time;
-	ssync->current_time_s = (double)ssync->current_time_ms / 1000.0;
-	ssync->interpolation_delay = (ssync_timestamp_t)(ssync->config.interpolation_ratio / (double)init_record.net_tick_rate * 1000.0);
+	ssync->current_time_s = (double)init_record.current_time / 1000.0;
+	ssync->interpolation_delay_s = ssync->config.interpolation_ratio / (double)init_record.net_tick_rate;
 	ssync->logic_tick_accumulator = 0.0;
 	ssync->net_tick_accumulator = 0.0;
 	BLOG_INFO(
@@ -277,18 +274,10 @@ ssync_write_schema(ssync_t* ssync, void* out) {
 
 ssync_info_t
 ssync_info(ssync_t* ssync) {
-	ssync_timestamp_t server_time = 0;
-	if (ssync->endpoint.incoming_archive.next != NULL) {
-		server_time = ssync->endpoint.incoming_archive.next->timestamp;
-	}
-
 	return (ssync_info_t){
 		.player_id = ssync->init_record.player_id,
 		.net_tick_rate = ssync->init_record.net_tick_rate,
 		.logic_tick_rate = ssync->init_record.logic_tick_rate,
-		.client_time = ssync->current_time_ms,
-		.interp_time = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0),
-		.server_time = server_time,
 		.schema_size = ssync->schema_size,
 		.num_incoming_snapshots = ssync->endpoint.incoming_archive.count,
 		.num_outgoing_snapshots = ssync->endpoint.outgoing_archive.count,
@@ -378,29 +367,14 @@ ssync_update(ssync_t* ssync, double dt) {
 	while (ssync->logic_tick_accumulator >= ssync->logic_tick_interval) {
 		ssync->logic_tick_accumulator -= ssync->logic_tick_interval;
 		ssync->current_time_s += ssync->logic_tick_interval;
-		ssync->current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 
-		const ssync_snapshot_t* next_snapshot = NULL;
-		ssync_timestamp_t simulation_time_ms;
-		if (ssync->simulation_time_s == 0.0) {
-			if (
-				ssync->endpoint.incoming_archive.next != NULL
-				&&
-				ssync->endpoint.incoming_archive.next->timestamp > ssync->interpolation_delay
-			) {
-				simulation_time_ms = ssync->endpoint.incoming_archive.next->timestamp - ssync->interpolation_delay;
-				next_snapshot = ssync_find_snapshot_pair(&ssync->endpoint.incoming_archive, simulation_time_ms);
-				if (next_snapshot != NULL) {
-					ssync->simulation_time_s = (double)simulation_time_ms / 1000.0;
-					BLOG_DEBUG("Started interpolation at %dms (current time: %dms)", simulation_time_ms, ssync->current_time_ms);
-				}
-			}
-		} else {
-			ssync->simulation_time_s += ssync->logic_tick_interval;
-			simulation_time_ms = (ssync_timestamp_t)(ssync->simulation_time_s * 1000.0);
-			next_snapshot = ssync_find_snapshot_pair(&ssync->endpoint.incoming_archive, simulation_time_ms);
-		}
+		double simulation_time_s = ssync->current_time_s - ssync->interpolation_delay_s;
+		if (simulation_time_s < 0.0) { continue; }
 
+		ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(simulation_time_s * 1000.0);
+		const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(
+			&ssync->endpoint.incoming_archive, simulation_time_ms
+		);
 		if (next_snapshot == NULL) { continue; }
 		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
@@ -495,6 +469,7 @@ ssync_update(ssync_t* ssync, double dt) {
 	}
 
 	// Send local objects
+	ssync_timestamp_t current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 	ssync->net_tick_accumulator += dt;
 	if (ssync->net_tick_accumulator >= ssync->net_tick_interval) {
 		ssync->net_tick_accumulator = fmod(ssync->net_tick_accumulator, ssync->net_tick_interval);
@@ -512,7 +487,7 @@ ssync_update(ssync_t* ssync, double dt) {
 		ssync_begin_outgoing_snapshot(
 			&snapshot_ctx,
 			&ssync->endpoint,
-			ssync->current_time_ms,
+			current_time_ms,
 			&packet_stream, &packet_bsv
 		);
 		ssync_obj_t tmp_obj = { 0 };
@@ -565,8 +540,9 @@ ssync_create(ssync_t* ssync, ssync_obj_flags_t flags) {
 		if (alloc_result.is_new) { break; }
 	}
 
+	ssync_timestamp_t current_time_ms = (ssync_timestamp_t)(ssync->current_time_s * 1000.0);
 	ssync_obj_info_t data = {
-		.created_at = ssync->current_time_ms,
+		.created_at = current_time_ms,
 		.flags = flags,
 		.is_local = true,
 	};
