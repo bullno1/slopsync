@@ -63,6 +63,7 @@ typedef struct {
 	int num_incoming_snapshots;
 	int num_outgoing_snapshots;
 	size_t schema_size;
+	uint16_t obj_id_bin;
 } ssync_info_t;
 
 typedef enum {

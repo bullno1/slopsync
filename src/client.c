@@ -281,6 +281,7 @@ ssync_info(ssync_t* ssync) {
 		.schema_size = ssync->schema_size,
 		.num_incoming_snapshots = ssync->endpoint.incoming_archive.count,
 		.num_outgoing_snapshots = ssync->endpoint.outgoing_archive.count,
+		.obj_id_bin = ssync->init_record.obj_id_bin,
 	};
 }
 
