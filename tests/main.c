@@ -1,0 +1,4 @@
+#define BLIB_IMPLEMENTATION
+#define BTEST_LOG_DEPTH 1
+#define BTEST_INCLUDE_DEFAULT_RUNNER
+#include <btest.h>

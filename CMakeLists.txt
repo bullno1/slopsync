@@ -1,31 +1,43 @@
-add_library(slopsync-shared STATIC "src/shared.c")
-target_link_libraries(slopsync-shared PRIVATE blibs)
-target_include_directories(slopsync-shared PUBLIC include)
+cmake_minimum_required(VERSION 3.15)
+project(slopsync)
 
-add_library(slopsync-client STATIC "src/client.c")
-target_link_libraries(slopsync-client PRIVATE blibs slopsync-shared)
-target_include_directories(slopsync-client PUBLIC include)
+# Fix output dir
+set(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR})
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/$<CONFIG>)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/$<CONFIG>)
 
-add_library(slopsync-server STATIC "src/server.c")
-target_link_libraries(slopsync-server PRIVATE blibs slopsync-shared)
-target_include_directories(slopsync-server PUBLIC include)
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-add_library(slopsync-static-schema STATIC "src/schema.c")
-target_link_libraries(slopsync-static-schema PRIVATE blibs slopsync-client)
-target_include_directories(slopsync-static-schema PUBLIC include)
+# Add deps first
+add_subdirectory(deps)
 
-if (NOT EMSCRIPTEN)
-	add_library(slopsyncd SHARED "src/slopsyncd.c")
-	target_link_libraries(slopsyncd PRIVATE blibs slopsync-server)
-	set_target_properties(slopsyncd PROPERTIES
-		C_VISIBILITY_PRESET hidden
-		PREFIX ""
+# Then everything else to avoid leaking into deps
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_EXTENSIONS OFF)
+
+if (MSVC)
+	add_compile_options(/W3 /WX)
+	add_compile_options(/wd4200) # Flexible array member is a standard feature since C99
+	add_compile_options(/wd4324) # _Alignof is intentional
+	add_compile_options(/wd4100) # Unreferenced parameter
+	add_compile_options(/wd4459) # Hiding global definition
+	add_compile_options(/experimental:c11atomics)  # Atomics
+	add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+
+	# Because CMake can't set proper flags even with CMAKE_INTERPROCEDURAL_OPTIMIZATION_Release
+	set(RELEASE_COMPILER_FLAGS "/Gy;/Ob2;/GL;/Oi")
+	set(RELEASE_LINKER_FLAGS "/LTCG")
+
+	add_compile_options("$<$<CONFIG:RelWithDebInfo>:${RELEASE_COMPILER_FLAGS}>")
+	add_link_options("$<$<CONFIG:RelWithDebInfo>:${RELEASE_LINKER_FLAGS}>")
+else()
+	add_compile_options(
+		-Wall -Wextra -pedantic -Werror
+		-Wno-unused-parameter
+		-Wno-error=c23-extensions
 	)
-	if (NOT MSVC)
-		target_link_options(slopsyncd PRIVATE
-			-Wl,--exclude-libs,ALL
-			-Wl,--no-whole-archive
-			-Wl,--no-undefined
-		)
-	endif ()
-endif ()
+endif()
+
+add_subdirectory(src)
+add_subdirectory(tests)

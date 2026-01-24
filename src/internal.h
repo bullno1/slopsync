@@ -760,7 +760,10 @@ ssync_read_obj_update(
 					for (int prop_index = 0; prop_index < num_props; ++prop_index) {
 						uint8_t changed;
 						if (!bitstream_read(bitstream, &changed, 1)) { return false; }
-						if (!changed) { continue; }
+						if (!changed) {
+							barray_push(current_obj->props, previous_props[prop_index], memctx);
+							continue;
+						}
 
 						uint8_t delta;
 						if (!bitstream_read(bitstream, &delta, 1)) { return false; }
