@@ -81,6 +81,13 @@ typedef struct {
 } ssync_obj_info_t;
 
 typedef struct {
+	float x;
+	float y;
+	float z;
+	float radius;
+} ssync_obj_spatial_info_t;
+
+typedef struct {
 	size_t max_message_size;
 
 	double interpolation_ratio;
@@ -115,6 +122,9 @@ ssync_info(ssync_t* ssync);
 
 const ssync_obj_info_t*
 ssync_obj_info(ssync_t* ssync, ssync_net_id_t obj_id);
+
+ssync_obj_spatial_info_t
+ssync_obj_spatial_info(ssync_t* ssync, ssync_net_id_t obj_id);
 
 void
 ssync_process_message(ssync_t* ssync, ssync_blob_t msg);

@@ -294,6 +294,78 @@ ssync_obj_info(ssync_t* ssync, ssync_net_id_t obj_id) {
 	return remote;
 }
 
+static float
+ssync_convert_prop(const ssync_prop_schema_t* schema, ssync_prop_t value) {
+	switch (schema->type) {
+		case SSYNC_PROP_TYPE_INT:
+			return (float)value;
+		case SSYNC_PROP_TYPE_FLOAT:
+			return schema->flags & SSYNC_PROP_ROTATION
+				? ssync_u16_to_rad(value)
+				: ssync_fixed_to_float(value, schema->precision);
+	}
+}
+
+static ssync_obj_spatial_info_t
+ssync_extract_spatial_info(const ssync_t* ssync, const ssync_obj_t* obj) {
+	ssync_obj_spatial_info_t result = { 0 };
+	const ssync_prop_t* props = obj->props;
+	for (
+		int prop_group_index = 0;
+		prop_group_index < ssync->schema.num_prop_groups;
+		++prop_group_index
+	) {
+		if (!ssync_obj_has_prop_group(obj, prop_group_index)) { continue; }
+
+		const ssync_prop_group_schema_t* prop_group = &ssync->schema.prop_groups[prop_group_index];
+		for (
+			int prop_index = 0;
+			prop_index < prop_group->num_props;
+			++prop_index
+		) {
+			const ssync_prop_schema_t* prop_schema = &prop_group->props[prop_index];
+			if (prop_schema->flags & SSYNC_PROP_POSITION_X) {
+				result.x = ssync_convert_prop(prop_schema, props[prop_index]);
+			}
+
+			if (prop_schema->flags & SSYNC_PROP_POSITION_Y) {
+				result.y = ssync_convert_prop(prop_schema, props[prop_index]);
+			}
+
+			if (prop_schema->flags & SSYNC_PROP_POSITION_Z) {
+				result.z = ssync_convert_prop(prop_schema, props[prop_index]);
+			}
+
+			if (prop_schema->flags & SSYNC_PROP_RADIUS) {
+				result.radius = ssync_convert_prop(prop_schema, props[prop_index]);
+			}
+		}
+
+		props += prop_group->num_props;
+	}
+
+	return result;
+}
+
+ssync_obj_spatial_info_t
+ssync_obj_spatial_info(ssync_t* ssync, ssync_net_id_t obj_id) {
+	if (ssync->endpoint.incoming_archive.next != NULL) {
+		const ssync_obj_t* obj = bhash_get_value(&ssync->endpoint.incoming_archive.next->objects, obj_id);
+		if (obj != NULL) {
+			return ssync_extract_spatial_info(ssync, obj);
+		}
+	}
+
+	if (ssync->endpoint.outgoing_archive.next != NULL) {
+		const ssync_obj_t* obj = bhash_get_value(&ssync->endpoint.outgoing_archive.next->objects, obj_id);
+		if (obj != NULL) {
+			return ssync_extract_spatial_info(ssync, obj);
+		}
+	}
+
+	return (ssync_obj_spatial_info_t){ 0 };
+}
+
 void
 ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 	bitstream_in_t packet_stream = {
@@ -633,7 +705,7 @@ ssync_prop_group(ssync_ctx_t* ctx, ssync_local_id_t prop_group_id) {
 			ctx->prop_group_index += 1;
 			ctx->prop_index = 0;
 
-			bool snapshot_has_prop_group = ssync_obj_has_prop_group(ctx->obj, ctx->prop_index - 1);
+			bool snapshot_has_prop_group = ssync_obj_has_prop_group(ctx->obj, ctx->prop_group_index - 1);
 			bool proxy_has_prop_group = ssync->config.has_prop_group(
 				ssync->config.userdata, ctx->obj_id, prop_group_id
 			);

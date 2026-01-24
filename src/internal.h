@@ -91,7 +91,6 @@ typedef struct {
 typedef enum {
 	SSYNC_PROP_TYPE_INT,
 	SSYNC_PROP_TYPE_FLOAT,
-	SSYNC_PROP_TYPE_BINARY,
 } ssync_prop_type_t;
 
 typedef struct {
