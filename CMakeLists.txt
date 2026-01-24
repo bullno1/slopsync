@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 project(slopsync)
 
+option(SLOPSYNC_BUILD_DEPS "Should it build its own dependencies" ON)
+
 # Fix output dir
 set(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/$<CONFIG>)
@@ -9,7 +11,9 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/$<CONFIG>)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # Add deps first
-add_subdirectory(deps)
+if (SLOPSYNC_BUILD_DEPS)
+	add_subdirectory(deps)
+endif ()
 
 # Then everything else to avoid leaking into deps
 
