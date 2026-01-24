@@ -43,7 +43,7 @@ static ssync_obj_schema_t schema = {
 	},
 };
 
-BTEST(serialization, full_update_round_trip) {
+BTEST(serialization, full_update) {
 	void* packet = barena_malloc(&fixture.arena, 1024);
 	bitstream_out_t out_stream = {
 		.data = packet,
@@ -81,7 +81,7 @@ BTEST(serialization, full_update_round_trip) {
 	ssync_cleanup_obj(&new_curr_obj, NULL);
 }
 
-BTEST(serialization, delta_update_round_trip) {
+BTEST(serialization, delta_update) {
 	void* packet = barena_malloc(&fixture.arena, 1024);
 	bitstream_out_t out_stream = {
 		.data = packet,
@@ -119,6 +119,137 @@ BTEST(serialization, delta_update_round_trip) {
 	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[0], 6);
 	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[1], 7);
 	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[2], 8);
+
+	ssync_cleanup_obj(&curr_obj, NULL);
+	ssync_cleanup_obj(&prev_obj, NULL);
+	ssync_cleanup_obj(&new_curr_obj, NULL);
+}
+
+BTEST(serialization, no_change) {
+	void* packet = barena_malloc(&fixture.arena, 1024);
+	bitstream_out_t out_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_out_t out;
+	bsv_ctx_t out_bsv = { .out = ssync_init_bsv_out(&out, &out_stream) };
+
+	ssync_obj_t curr_obj = { 0 };
+	ssync_obj_t prev_obj = { 0 };
+
+	prev_obj.prop_group_mask = 0x1;
+	barray_push(prev_obj.props, 6, NULL);
+	barray_push(prev_obj.props, 7, NULL);
+	barray_push(prev_obj.props, 8, NULL);
+
+	curr_obj.prop_group_mask = 0x1;
+	barray_push(curr_obj.props, 6, NULL);
+	barray_push(curr_obj.props, 7, NULL);
+	barray_push(curr_obj.props, 8, NULL);
+
+	ssync_write_obj_update(&out_bsv, &out_stream, &schema, &curr_obj, &prev_obj);
+
+	bitstream_in_t in_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_in_t in;
+	bsv_ctx_t in_bsv = { .in = ssync_init_bsv_in(&in, &in_stream) };
+
+	ssync_obj_t new_curr_obj = { 0 };
+	ssync_read_obj_update(&in_bsv, &in_stream, NULL, &schema, &prev_obj, &new_curr_obj);
+
+	BTEST_EXPECT_EQUAL("%d", new_curr_obj.prop_group_mask, 0x01);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[0], 6);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[1], 7);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[2], 8);
+
+	ssync_cleanup_obj(&curr_obj, NULL);
+	ssync_cleanup_obj(&prev_obj, NULL);
+	ssync_cleanup_obj(&new_curr_obj, NULL);
+}
+
+BTEST(serialization, add_prop_group) {
+	void* packet = barena_malloc(&fixture.arena, 1024);
+	bitstream_out_t out_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_out_t out;
+	bsv_ctx_t out_bsv = { .out = ssync_init_bsv_out(&out, &out_stream) };
+
+	ssync_obj_t curr_obj = { 0 };
+	ssync_obj_t prev_obj = { 0 };
+
+	prev_obj.prop_group_mask = 0x1;
+	barray_push(prev_obj.props, 6, NULL);
+	barray_push(prev_obj.props, 7, NULL);
+	barray_push(prev_obj.props, 8, NULL);
+
+	curr_obj.prop_group_mask = 0x3;
+	barray_push(curr_obj.props, 6, NULL);
+	barray_push(curr_obj.props, 7, NULL);
+	barray_push(curr_obj.props, 8, NULL);
+	barray_push(curr_obj.props, 9, NULL);
+
+	ssync_write_obj_update(&out_bsv, &out_stream, &schema, &curr_obj, &prev_obj);
+
+	bitstream_in_t in_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_in_t in;
+	bsv_ctx_t in_bsv = { .in = ssync_init_bsv_in(&in, &in_stream) };
+
+	ssync_obj_t new_curr_obj = { 0 };
+	ssync_read_obj_update(&in_bsv, &in_stream, NULL, &schema, &prev_obj, &new_curr_obj);
+
+	BTEST_EXPECT_EQUAL("%d", new_curr_obj.prop_group_mask, 0x03);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[0], 6);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[1], 7);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[2], 8);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[3], 9);
+
+	ssync_cleanup_obj(&curr_obj, NULL);
+	ssync_cleanup_obj(&prev_obj, NULL);
+	ssync_cleanup_obj(&new_curr_obj, NULL);
+}
+
+BTEST(serialization, rem_prop_group) {
+	void* packet = barena_malloc(&fixture.arena, 1024);
+	bitstream_out_t out_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_out_t out;
+	bsv_ctx_t out_bsv = { .out = ssync_init_bsv_out(&out, &out_stream) };
+
+	ssync_obj_t curr_obj = { 0 };
+	ssync_obj_t prev_obj = { 0 };
+
+	prev_obj.prop_group_mask = 0x3;
+	barray_push(prev_obj.props, 6, NULL);
+	barray_push(prev_obj.props, 7, NULL);
+	barray_push(prev_obj.props, 8, NULL);
+	barray_push(prev_obj.props, 9, NULL);
+
+	curr_obj.prop_group_mask = 0x2;
+	barray_push(curr_obj.props, 8, NULL);
+
+	ssync_write_obj_update(&out_bsv, &out_stream, &schema, &curr_obj, &prev_obj);
+
+	bitstream_in_t in_stream = {
+		.data = packet,
+		.num_bytes = 1024,
+	};
+	ssync_bsv_in_t in;
+	bsv_ctx_t in_bsv = { .in = ssync_init_bsv_in(&in, &in_stream) };
+
+	ssync_obj_t new_curr_obj = { 0 };
+	ssync_read_obj_update(&in_bsv, &in_stream, NULL, &schema, &prev_obj, &new_curr_obj);
+
+	BTEST_EXPECT_EQUAL("%d", new_curr_obj.prop_group_mask, 0x02);
+	BTEST_EXPECT_EQUAL("%" PRId64, new_curr_obj.props[0], 8);
 
 	ssync_cleanup_obj(&curr_obj, NULL);
 	ssync_cleanup_obj(&prev_obj, NULL);
