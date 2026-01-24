@@ -33,8 +33,8 @@ typedef struct {
 } snetd_tick_t;
 
 typedef struct {
-	const char* username;
 	int player_index;
+	const char* username;
 } snetd_player_joined_t;
 
 typedef struct {

@@ -51,7 +51,7 @@ init(snetd_env_t* env, const snetd_game_options_t* options) {
 		.current_filename = __FILE__,
 		.current_depth_in_project = 2,
 	});
-	blog_add_logger(BLOG_LEVEL_DEBUG, blog_snetd, env);
+	blog_add_logger(BLOG_LEVEL_TRACE, blog_snetd, env);
 
 	slopsyncd_t* ssd = snetd_malloc(env, sizeof(slopsyncd_t));
 	ssyncd_config_t config = {
@@ -102,10 +102,14 @@ event(void* ctx, const snetd_event_t* event) {
 			snetd_allow_join(ssd->env);
 			break;
 		case SNETD_EVENT_PLAYER_JOINED:
-			ssyncd_add_player(ssd->ssd, event->player_joined.player_index, event->player_joined.username);
+			ssyncd_add_player(
+				ssd->ssd,
+				event->player_joined.player_index,
+				event->player_joined.username
+			);
 			break;
 		case SNETD_EVENT_PLAYER_LEFT:
-			ssyncd_remove_player(ssd->ssd, event->player_joined.player_index);
+			ssyncd_remove_player(ssd->ssd, event->player_left.player_index);
 			break;
 		case SNETD_EVENT_MESSAGE:
 			ssyncd_process_message(

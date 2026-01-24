@@ -153,7 +153,9 @@ ssyncd_init(const ssyncd_config_t* config) {
 void
 ssyncd_cleanup(ssyncd_t* ssyncd) {
 	for (int i = 0; i < ssyncd->config.max_num_players; ++i) {
-		ssync_cleanup_endpoint(&ssyncd->players[i].endpoint);
+		if (ssyncd->players[i].username) {
+			ssync_cleanup_endpoint(&ssyncd->players[i].endpoint);
+		}
 	}
 	ssync_cleanup_snapshot_pool(&ssyncd->snapshot_pool, ssyncd);
 
@@ -308,8 +310,8 @@ ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
 
 				ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, id);
 				if (obj_info == NULL || obj_info->authority != player_id) {
-						ssync_discard_incoming_packet(&ctx);
-						goto end;
+					ssync_discard_incoming_packet(&ctx);
+					goto end;
 				}
 				ssync_copy_obj(&obj_info->data, data, ssyncd);
 			} break;

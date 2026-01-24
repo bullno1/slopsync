@@ -661,6 +661,8 @@ ssync_write_obj_update(
 						ssync_prop_t current_value = current_props[prop_index];
 						ssync_prop_t previous_value = previous_props[prop_index];
 						if (current_value != previous_value) {
+							bitstream_write(bitstream, &(uint8_t){ 1 }, 1);
+
 							// Pick between delta and full value encoding
 							int64_t out_value;
 
@@ -668,13 +670,6 @@ ssync_write_obj_update(
 							int64_t diff;
 							if (!ckd_sub(&diff, current_value, previous_value)) {
 								diff = INT64_MAX;
-							}
-
-							if (diff == 0) {
-								bitstream_write(bitstream, &(uint8_t){ 0 }, 1);
-								continue;  // No change
-							} else {
-								bitstream_write(bitstream, &(uint8_t){ 1 }, 1);
 							}
 
 							uint8_t method;
@@ -688,6 +683,8 @@ ssync_write_obj_update(
 
 							bitstream_write(bitstream, &method, 1);
 							bsv_auto(bsv, &out_value);
+						} else {
+							bitstream_write(bitstream, &(uint8_t){ 0 }, 1);
 						}
 					}
 				} else {  // Fully write all props
@@ -775,6 +772,8 @@ ssync_read_obj_update(
 						barray_push(current_obj->props, new_value, memctx);
 					}
 					break;
+				default:
+					return false;
 			}
 		} else {  // No change
 			if (previous_has_prop_group) {

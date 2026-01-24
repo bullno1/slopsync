@@ -358,10 +358,8 @@ end:
 	ssync_end_incoming_packet(&ctx);
 }
 
-void
-ssync_update(ssync_t* ssync, double dt) {
-	if (ssync->init_record.net_tick_rate == 0) { return; }
-
+static void
+ssync_update_initialized(ssync_t* ssync, double dt) {
 	ssync->logic_tick_accumulator += dt;
 
 	// Interpolate remote objects
@@ -526,6 +524,29 @@ ssync_update(ssync_t* ssync, double dt) {
 			.size = (packet_stream.bit_pos + 7) / 8,
 		};
 		ssync->config.send_msg(ssync->config.userdata, msg, false);
+	}
+}
+
+static void
+ssync_update_keep_alive(ssync_t* ssync, double dt) {
+	bitstream_out_t packet_stream = {
+		.data = ssync->outgoing_packet_buf,
+		.num_bytes = ssync->config.max_message_size,
+	};
+	ssync_write_record_type(&packet_stream, SSYNC_RECORD_TYPE_END);
+	ssync_blob_t msg = {
+		.data = ssync->outgoing_packet_buf,
+		.size = (packet_stream.bit_pos + 7) / 8,
+	};
+	ssync->config.send_msg(ssync->config.userdata, msg, false);
+}
+
+void
+ssync_update(ssync_t* ssync, double dt) {
+	if (ssync->init_record.net_tick_rate == 0) {
+		ssync_update_keep_alive(ssync, dt);
+	} else {
+		ssync_update_initialized(ssync, dt);
 	}
 }
 
