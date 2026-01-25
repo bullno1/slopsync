@@ -4,6 +4,10 @@
 #include <bhash.h>
 #include <stdlib.h>
 
+#ifndef M_PI
+#define M_PI   3.14159265358979323846264338327950288
+#endif
+
 static const double NET_INTERVAL_S = 1.0 / 20.0;
 static const double LOGIC_INTERVAL_S = 1.0 / 30.0;
 
@@ -252,4 +256,55 @@ BTEST(world, create_destroy) {
 	ssync_update(client2->ssync, LOGIC_INTERVAL_S);
 
 	BTEST_EXPECT_EQUAL("%d", bhash_len(&client2->world), 0);
+}
+
+BTEST(world, update_prop) {
+	client_t* client1 = &world_fixture.client1;
+	client_t* client2 = &world_fixture.client2;
+	ssyncd_t* server = world_fixture.server;
+
+	ssync_net_id_t id;
+	obj_t* obj = create_local_obj(client1, SSYNC_OBJ_DEFAULT, &id);
+	obj->has_transform = true;
+	obj->x = 2.0;
+	obj->y = 3.0;
+	obj->rotation = M_PI;
+	ssync_update(client1->ssync, NET_INTERVAL_S);
+
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+
+	ssync_update(client2->ssync, NET_INTERVAL_S * 3);
+	BTEST_EXPECT_EQUAL("%d", bhash_len(&client2->world), 1);
+
+	obj_t* proxy = &client2->world.values[0];
+	BTEST_EXPECT(proxy->has_transform);
+	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
+
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+
+	ssync_update(client2->ssync, NET_INTERVAL_S);
+	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
+
+	obj->x = 1.f;
+	ssync_update(client1->ssync, NET_INTERVAL_S);
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+
+	ssync_update(client2->ssync, NET_INTERVAL_S * 2);
+	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
+	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
 }

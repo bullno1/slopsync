@@ -169,6 +169,9 @@ ssyncd_cleanup(ssyncd_t* ssyncd) {
 	}
 	ssync_cleanup_snapshot_pool(&ssyncd->snapshot_pool, ssyncd);
 
+	for (bhash_index_t i = 0; i < bhash_len(&ssyncd->objects); ++i) {
+		ssync_cleanup_obj(&ssyncd->objects.values[i].data, ssyncd);
+	}
 	bhash_cleanup(&ssyncd->objects);
 
 	ssyncd_free(&ssyncd->config, ssyncd->players);
