@@ -208,7 +208,6 @@ static inline void
 ssync_reinit_snapshot(ssync_snapshot_t* snapshot, void* memctx) {
 	bhash_config_t config = bhash_config_default();
 	config.memctx = memctx;
-	config.removable = false;
 	bhash_reinit(&snapshot->objects, config);
 }
 

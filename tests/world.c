@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 static const double NET_INTERVAL_S = 1.0 / 20.0;
-/*static const double LOGIC_INTERVAL_S = 1.0 / 30.0;*/
+static const double LOGIC_INTERVAL_S = 1.0 / 30.0;
 
 typedef enum {
 	PROP_GROUP_TRANSFORM = 0,
@@ -133,19 +133,22 @@ server_send(void* userdata, int receiver, ssync_blob_t message, bool reliable) {
 }
 
 static obj_t*
-create_local_obj(client_t* client, ssync_obj_flags_t flags) {
+create_local_obj(client_t* client, ssync_obj_flags_t flags, ssync_net_id_t* id_ptr) {
 	ssync_net_id_t id = ssync_create(client->ssync, flags);
 	bhash_alloc_result_t result = bhash_alloc(&client->world, id);
 	client->world.keys[result.index] = id;
 	client->world.values[result.index] = (obj_t){ 0 };
 
+	if (id_ptr != NULL) { *id_ptr = id; }
+
 	return &client->world.values[result.index];
 }
 
-/*static void*/
-/*destroy_local_obj(client_t* client, ssync_net_id_t id) {*/
-	/*bhash_remove(&client->world, id);*/
-/*}*/
+static void
+destroy_local_obj(client_t* client, ssync_net_id_t id) {
+	ssync_destroy(client->ssync, id);
+	bhash_remove(&client->world, id);
+}
 
 static void
 init_per_world_test(void) {
@@ -218,12 +221,13 @@ static btest_suite_t world = {
 	.cleanup_per_test = cleanup_per_world_test,
 };
 
-BTEST(world, create) {
+BTEST(world, create_destroy) {
 	client_t* client1 = &world_fixture.client1;
 	client_t* client2 = &world_fixture.client2;
 	ssyncd_t* server = world_fixture.server;
 
-	create_local_obj(client1, SSYNC_OBJ_DEFAULT);
+	ssync_net_id_t id;
+	create_local_obj(client1, SSYNC_OBJ_DEFAULT, &id);
 	ssync_update(client1->ssync, NET_INTERVAL_S);
 
 	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
@@ -238,4 +242,14 @@ BTEST(world, create) {
 	ssync_update(client2->ssync, NET_INTERVAL_S);
 
 	BTEST_EXPECT_EQUAL("%d", bhash_len(&client2->world), 1);
+
+	destroy_local_obj(client1, id);
+	ssync_update(client1->ssync, NET_INTERVAL_S);
+
+	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
+	ssyncd_broadcast(server);
+
+	ssync_update(client2->ssync, LOGIC_INTERVAL_S);
+
+	BTEST_EXPECT_EQUAL("%d", bhash_len(&client2->world), 0);
 }

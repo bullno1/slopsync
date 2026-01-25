@@ -451,11 +451,6 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 		if (simulation_time_s < 0.0) { continue; }
 
 		ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(simulation_time_s * 1000.0);
-		const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(
-			&ssync->endpoint.incoming_archive, simulation_time_ms
-		);
-		if (next_snapshot == NULL) { continue; }
-		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
 		// Execute queued creations
 		int num_created_objects = (int)barray_len(ssync->created_objects);
@@ -496,6 +491,12 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 			}
 		}
 		barray_resize(ssync->destroyed_objects, num_delayed_destructions, ssync);
+
+		const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(
+			&ssync->endpoint.incoming_archive, simulation_time_ms
+		);
+		if (next_snapshot == NULL) { continue; }
+		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
 		// Update existing objects
 		float interpolant =
