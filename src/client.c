@@ -2,6 +2,13 @@
 #define BSV_API static inline
 #define BARRAY_API static inline
 #define BHASH_API static inline
+#define SSYNC_HOST_REALLOC ssync_client_realloc
+
+#include <stddef.h>
+
+static void*
+ssync_client_realloc(void* ptr, size_t size, void* ctx);
+
 #include <slopsync/client.h>
 #include <blog.h>
 #include <bmacro.h>
@@ -61,15 +68,15 @@ struct ssync_s {
 
 // Allocator {{{
 
-void*
-ssync_host_realloc(void* ptr, size_t size, void* ctx) {
+static void*
+ssync_client_realloc(void* ptr, size_t size, void* ctx) {
 	ssync_t* ssync = ctx;
 	return ssync->config.realloc(ssync->config.userdata, ptr, size);
 }
 
 static void*
 ssync_blib_realloc(void* ptr, size_t size, void* ctx) {
-	return ssync_host_realloc(ptr, size, ctx);
+	return ssync_client_realloc(ptr, size, ctx);
 }
 
 static void*
@@ -421,6 +428,7 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 				}
 			} break;
 			default:
+				BLOG_WARN("Invalid record type: %d", record_type);
 				ssync_discard_incoming_packet(&ctx);
 				goto end;
 		}
@@ -568,9 +576,9 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 			ssync_net_id_t id = ssync->local_objects.keys[i];
 			const ssync_obj_info_t* info = &ssync->local_objects.values[i];
 
-			if (snapshot_ctx.has_space) {
-				ssync_reset_obj(&tmp_obj);
+			ssync_reset_obj(&tmp_obj);
 
+			if (snapshot_ctx.has_space) {
 				ssync_ctx_t sync_ctx = {
 					.mode = SSYNC_MODE_WRITE,
 					.ssync = ssync,
@@ -578,13 +586,13 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 					.obj = &tmp_obj,
 				};
 				ssync->config.sync(ssync->config.userdata, &sync_ctx, id);
-
-				ssync_add_outgoing_obj(
-					&snapshot_ctx,
-					info->created_at, info->flags,
-					id, &tmp_obj
-				);
 			}
+
+			ssync_add_outgoing_obj(
+				&snapshot_ctx,
+				info->created_at, info->flags,
+				id, &tmp_obj
+			);
 		}
 
 		ssync_cleanup_obj(&tmp_obj, ssync);

@@ -12,6 +12,14 @@
 #include "bitstream.h"
 #include "jtckdint.h"
 
+#ifndef SSYNC_HOST_REALLOC
+#define SSYNC_HOST_REALLOC ssync_host_realloc
+
+extern void*
+ssync_host_realloc(void* ptr, size_t size, void* ctx);
+
+#endif
+
 #ifndef SSYNC_PROP_GROUP_MASK_TYPE
 #define SSYNC_PROP_GROUP_MASK_TYPE uint32_t
 #endif
@@ -170,9 +178,6 @@ typedef struct {
 	ssync_bsv_out_t bsv_out;
 } ssync_record_ctx_t;
 
-extern void*
-ssync_host_realloc(void* ptr, size_t size, void* ctx);
-
 // Object {{{
 
 static inline void
@@ -185,7 +190,9 @@ ssync_copy_obj(ssync_obj_t* dst, const ssync_obj_t* src, void* memctx) {
 	dst->prop_group_mask = src->prop_group_mask;
 	size_t num_props = barray_len(src->props);
 	barray_resize(dst->props, num_props, memctx);
-	memcpy(dst->props, src->props, num_props * sizeof(ssync_prop_t));
+	if (num_props > 0) {
+		memcpy(dst->props, src->props, num_props * sizeof(ssync_prop_t));
+	}
 }
 
 static inline bool
@@ -223,7 +230,7 @@ static inline void
 ssync_destroy_snapshot(ssync_snapshot_t* snapshot, void* memctx) {
 	ssync_clear_snapshot(snapshot, memctx);
 	bhash_cleanup(&snapshot->objects);
-	ssync_host_realloc(snapshot, 0, memctx);
+	SSYNC_HOST_REALLOC(snapshot, 0, memctx);
 }
 
 static inline void
@@ -247,7 +254,7 @@ ssync_acquire_snapshot(ssync_snapshot_pool_t* pool, ssync_timestamp_t timestamp,
 		ssync_clear_snapshot(snapshot, memctx);
 		bhash_clear(&snapshot->objects);
 	} else {
-		snapshot = ssync_host_realloc(NULL, sizeof(ssync_snapshot_t), memctx);
+		snapshot = SSYNC_HOST_REALLOC(NULL, sizeof(ssync_snapshot_t), memctx);
 		*snapshot = (ssync_snapshot_t){ 0 };
 		ssync_reinit_snapshot(snapshot, memctx);
 	}

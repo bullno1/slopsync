@@ -3,6 +3,7 @@
 export BUILD_TYPE=${BUILD_TYPE:-RelWithDebInfo}
 
 ./build $@ || true
+bin/${BUILD_TYPE}/slopsync-tests || true
 
 inotifywait -r -e CLOSE_WRITE -m include src tests | \
 	while read path action file

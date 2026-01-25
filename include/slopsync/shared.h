@@ -16,6 +16,8 @@ typedef enum {
 
 typedef int ssync_obj_flags_t;
 
+#define SSYNC_OBJ_DEFAULT (ssync_obj_flags_t)(0)
+
 typedef enum {
 	SSYNC_PROP_INTERPOLATE = 1 << 0,
 	SSYNC_PROP_EXTRAPOLATE = 1 << 1,

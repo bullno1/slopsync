@@ -3,7 +3,7 @@ target_link_libraries(slopsync-shared PRIVATE blibs)
 target_include_directories(slopsync-shared PUBLIC "../include")
 
 add_library(slopsync-client STATIC "client.c")
-target_link_libraries(slopsync-client PRIVATE blibs slopsync-shared)
+target_link_libraries(slopsync-client PRIVATE blibs slopsync-shared $<$<PLATFORM_ID:Linux>:m>)
 target_include_directories(slopsync-client PUBLIC "../include")
 
 add_library(slopsync-server STATIC "server.c")

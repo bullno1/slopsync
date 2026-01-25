@@ -1,4 +1,14 @@
 // vim: set foldmethod=marker foldlevel=0:
+#define BSV_API static inline
+#define BARRAY_API static inline
+#define BHASH_API static inline
+#define SSYNC_HOST_REALLOC ssync_server_realloc
+
+#include <stddef.h>
+
+static void*
+ssync_server_realloc(void* ptr, size_t size, void* ctx);
+
 #include <slopsync/server.h>
 #include <blog.h>
 #include "internal.h"
@@ -37,15 +47,15 @@ struct ssyncd_s {
 
 // Allocator {{{
 
-void*
-ssync_host_realloc(void* ptr, size_t size, void* ctx) {
+static void*
+ssync_server_realloc(void* ptr, size_t size, void* ctx) {
 	ssyncd_t* ssync = ctx;
 	return ssync->config.realloc(ssync->config.userdata, ptr, size);
 }
 
 static void*
 ssyncd_blib_realloc(void* ptr, size_t size, void* ctx) {
-	return ssync_host_realloc(ptr, size, ctx);
+	return ssync_server_realloc(ptr, size, ctx);
 }
 
 static void*
