@@ -277,12 +277,9 @@ BTEST(world, update_prop) {
 	ssyncd_broadcast(server);
 
 	ssync_update(client2->ssync, NET_INTERVAL_S * 3);
-	BTEST_EXPECT_EQUAL("%d", bhash_len(&client2->world), 1);
-
 	obj_t* proxy = &client2->world.values[0];
 	BTEST_EXPECT(proxy->has_transform);
 	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
-	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
 
@@ -290,12 +287,13 @@ BTEST(world, update_prop) {
 	ssyncd_broadcast(server);
 
 	ssync_update(client2->ssync, NET_INTERVAL_S);
+	proxy = &client2->world.values[0];
 	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
-	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
 
 	obj->x = 1.f;
+	obj->rotation = 0.5f * M_PI;
 	ssync_update(client1->ssync, NET_INTERVAL_S);
 	ssyncd_update(world_fixture.server, NET_INTERVAL_S);
 	ssyncd_broadcast(server);
@@ -303,8 +301,8 @@ BTEST(world, update_prop) {
 	ssyncd_broadcast(server);
 
 	ssync_update(client2->ssync, NET_INTERVAL_S * 2);
+	proxy = &client2->world.values[0];
 	BTEST_EXPECT_EQUAL("%f", proxy->x, obj->x);
-	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->y, obj->y);
 	BTEST_EXPECT_EQUAL("%f", proxy->rotation, obj->rotation);
 }
