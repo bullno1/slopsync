@@ -313,64 +313,117 @@ ssync_convert_prop(const ssync_prop_schema_t* schema, ssync_prop_t value) {
 	}
 }
 
-static ssync_obj_spatial_info_t
-ssync_extract_spatial_info(const ssync_t* ssync, const ssync_obj_t* obj) {
-	ssync_obj_spatial_info_t result = { 0 };
-	const ssync_prop_t* props = obj->props;
-	for (
-		int prop_group_index = 0;
-		prop_group_index < ssync->schema.num_prop_groups;
-		++prop_group_index
-	) {
-		if (!ssync_obj_has_prop_group(obj, prop_group_index)) { continue; }
+static void
+ssync_extract_spatial_info(
+	ssync_t* ssync,
+	ssync_net_id_t obj_id,
+	ssync_obj_debug_info_t* debug_info,
+	const ssync_snapshot_pool_t* pool
+) {
+	int limit = debug_info->num_snapshots;
+	int num_found_snapshots = 0;
 
-		const ssync_prop_group_schema_t* prop_group = &ssync->schema.prop_groups[prop_group_index];
-		for (
-			int prop_index = 0;
-			prop_index < prop_group->num_props;
-			++prop_index
-		) {
-			const ssync_prop_schema_t* prop_schema = &prop_group->props[prop_index];
-			if (prop_schema->flags & SSYNC_PROP_POSITION_X) {
-				result.x = ssync_convert_prop(prop_schema, props[prop_index]);
-			}
-
-			if (prop_schema->flags & SSYNC_PROP_POSITION_Y) {
-				result.y = ssync_convert_prop(prop_schema, props[prop_index]);
-			}
-
-			if (prop_schema->flags & SSYNC_PROP_POSITION_Z) {
-				result.z = ssync_convert_prop(prop_schema, props[prop_index]);
-			}
-
-			if (prop_schema->flags & SSYNC_PROP_RADIUS) {
-				result.radius = ssync_convert_prop(prop_schema, props[prop_index]);
-			}
-		}
-
-		props += prop_group->num_props;
+	debug_info->next_snapshot = -1;
+	debug_info->prev_snapshot = -1;
+	double simulation_time_s = ssync->current_time_s - ssync->interpolation_delay_s;
+	ssync_timestamp_t simulation_time_ms = (ssync_timestamp_t)(simulation_time_s * 1000.0);
+	const ssync_snapshot_t* next_snapshot = ssync_find_snapshot_pair(
+		&ssync->endpoint.incoming_archive, simulation_time_ms
+	);
+	const ssync_snapshot_t* prev_snapshot = NULL;
+	if (next_snapshot) {
+		prev_snapshot = next_snapshot->next;
 	}
 
-	return result;
+	for (
+		const ssync_snapshot_t* itr = pool->next;
+		itr != NULL && num_found_snapshots < limit;
+		itr = itr->next
+	) {
+		const ssync_obj_t* obj = bhash_get_value(&itr->objects, obj_id);
+		if (obj == NULL) { break; }
+
+		if (itr == next_snapshot) {
+			debug_info->next_snapshot = num_found_snapshots;
+		}
+		if (itr == prev_snapshot) {
+			debug_info->prev_snapshot = num_found_snapshots;
+		}
+
+		ssync_obj_spatial_info_t result = { .timestamp = itr->timestamp };
+		const ssync_prop_t* props = obj->props;
+		for (
+			int prop_group_index = 0;
+			prop_group_index < ssync->schema.num_prop_groups;
+			++prop_group_index
+		) {
+			if (!ssync_obj_has_prop_group(obj, prop_group_index)) { continue; }
+
+			const ssync_prop_group_schema_t* prop_group = &ssync->schema.prop_groups[prop_group_index];
+			for (
+				int prop_index = 0;
+				prop_index < prop_group->num_props;
+				++prop_index
+			) {
+				const ssync_prop_schema_t* prop_schema = &prop_group->props[prop_index];
+				if (prop_schema->flags & SSYNC_PROP_POSITION_X) {
+					result.x = ssync_convert_prop(prop_schema, props[prop_index]);
+				}
+
+				if (prop_schema->flags & SSYNC_PROP_POSITION_Y) {
+					result.y = ssync_convert_prop(prop_schema, props[prop_index]);
+				}
+
+				if (prop_schema->flags & SSYNC_PROP_POSITION_Z) {
+					result.z = ssync_convert_prop(prop_schema, props[prop_index]);
+				}
+
+				if (prop_schema->flags & SSYNC_PROP_RADIUS) {
+					result.radius = ssync_convert_prop(prop_schema, props[prop_index]);
+				}
+			}
+
+			props += prop_group->num_props;
+		}
+
+		debug_info->snapshots[num_found_snapshots++] = result;
+	}
+
+	debug_info->num_snapshots = num_found_snapshots;
+	if (debug_info->next_snapshot >= 0 && debug_info->prev_snapshot >= 0) {
+		ssync_timestamp_t from_time = debug_info->snapshots[debug_info->prev_snapshot].timestamp;
+		ssync_timestamp_t to_time   = debug_info->snapshots[debug_info->next_snapshot].timestamp;
+		debug_info->interpolant =
+			  (float)(simulation_time_ms - from_time)
+			/ (float)(to_time - from_time);
+	}
 }
 
-ssync_obj_spatial_info_t
-ssync_obj_spatial_info(ssync_t* ssync, ssync_net_id_t obj_id) {
+void
+ssync_obj_debug_info(
+	ssync_t* ssync,
+	ssync_net_id_t obj_id,
+	ssync_obj_debug_info_t* debug_info
+) {
 	if (ssync->endpoint.incoming_archive.next != NULL) {
 		const ssync_obj_t* obj = bhash_get_value(&ssync->endpoint.incoming_archive.next->objects, obj_id);
 		if (obj != NULL) {
-			return ssync_extract_spatial_info(ssync, obj);
+			ssync_extract_spatial_info(
+				ssync, obj_id, debug_info,
+				&ssync->endpoint.incoming_archive
+			);
 		}
 	}
 
 	if (ssync->endpoint.outgoing_archive.next != NULL) {
 		const ssync_obj_t* obj = bhash_get_value(&ssync->endpoint.outgoing_archive.next->objects, obj_id);
 		if (obj != NULL) {
-			return ssync_extract_spatial_info(ssync, obj);
+			ssync_extract_spatial_info(
+				ssync, obj_id, debug_info,
+				&ssync->endpoint.outgoing_archive
+			);
 		}
 	}
-
-	return (ssync_obj_spatial_info_t){ 0 };
 }
 
 void

@@ -57,7 +57,7 @@ init(snetd_env_t* env, const snetd_game_options_t* options) {
 	ssyncd_config_t config = {
 		.max_num_players = options->max_num_players,
 		.max_message_size = 1100 * 4,
-		.net_tick_rate = 20,  // TODO: pass this from options
+		.net_tick_rate = 30,  // TODO: pass this from options
 		.logic_tick_rate = 30,
 		.realloc = ssyncd_realloc,
 		.send_msg = ssyncd_send,

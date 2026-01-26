@@ -352,11 +352,11 @@ ssync_find_snapshot_pair(const ssync_snapshot_pool_t* archive, ssync_timestamp_t
 		const ssync_snapshot_t* a = itr;
 		const ssync_snapshot_t* b = itr->next;
 
-		if (b->timestamp <= timestamp && timestamp <= a->timestamp) {
+		if (b->timestamp <= timestamp && timestamp < a->timestamp) {
 			return a;
 		}
 
-		if (timestamp > a->timestamp) {
+		if (timestamp >= a->timestamp) {
 			return NULL;
 		}
 

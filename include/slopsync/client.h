@@ -85,7 +85,16 @@ typedef struct {
 	float y;
 	float z;
 	float radius;
+	ssync_timestamp_t timestamp;
 } ssync_obj_spatial_info_t;
+
+typedef struct {
+	int prev_snapshot;
+	int next_snapshot;
+	float interpolant;
+	int num_snapshots;
+	ssync_obj_spatial_info_t snapshots[];
+} ssync_obj_debug_info_t;
 
 typedef struct {
 	size_t max_message_size;
@@ -123,8 +132,12 @@ ssync_info(ssync_t* ssync);
 const ssync_obj_info_t*
 ssync_obj_info(ssync_t* ssync, ssync_net_id_t obj_id);
 
-ssync_obj_spatial_info_t
-ssync_obj_spatial_info(ssync_t* ssync, ssync_net_id_t obj_id);
+void
+ssync_obj_debug_info(
+	ssync_t* ssync,
+	ssync_net_id_t obj_id,
+	ssync_obj_debug_info_t* debug_info
+);
 
 void
 ssync_process_message(ssync_t* ssync, ssync_blob_t msg);
