@@ -36,6 +36,17 @@ struct ssync_ctx_s {
 	float interpolant;
 };
 
+typedef struct {
+	ssync_net_id_t id;
+	ssync_timestamp_t timestamp;
+	ssync_obj_flags_t flags;
+} ssync_obj_create_record_t;
+
+typedef struct {
+	ssync_net_id_t id;
+	ssync_timestamp_t timestamp;
+} ssync_obj_destroy_record_t;
+
 struct ssync_s {
 	ssync_config_t config;
 	ssync_endpoint_config_t endpoint_config;
@@ -459,20 +470,29 @@ ssync_process_message(ssync_t* ssync, ssync_blob_t msg) {
 				}
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_CREATE: {
-				ssync_obj_create_record_t record;
-				const ssync_obj_t* obj;
-				if (!ssync_process_process_object_create_record(&ctx, &record, &obj)) {
+				ssync_obj_header_t hdr;
+				ssync_obj_flags_t flags;
+				if (!ssync_process_process_object_create_record(&ctx, &hdr, &flags, NULL)) {
 					goto end;
 				}
 
+				ssync_obj_create_record_t record = {
+					.id = hdr.id,
+					.timestamp = (int64_t)ctx.incoming_snapshot->timestamp + hdr.timestamp_offset,
+					.flags = flags,
+				};
 				barray_push(ssync->created_objects, record, ssync);
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_DESTROY: {
-				ssync_obj_destroy_record_t record;
-				if (!ssync_process_process_object_destroy_record(&ctx, &record)) {
+				ssync_obj_header_t hdr;
+				if (!ssync_process_process_object_destroy_record(&ctx, &hdr)) {
 					goto end;
 				}
 
+				ssync_obj_destroy_record_t record = {
+					.id = hdr.id,
+					.timestamp = (int64_t)ctx.incoming_snapshot->timestamp + hdr.timestamp_offset,
+				};
 				barray_push(ssync->destroyed_objects, record, ssync);
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_UPDATE: {
@@ -552,9 +572,6 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 		ssync_snapshot_t* prev_snapshot = next_snapshot->next;
 
 		// Update existing objects
-		float interpolant =
-			  (float)(simulation_time_ms - prev_snapshot->timestamp)
-			/ (float)(next_snapshot->timestamp - prev_snapshot->timestamp);
 		bhash_index_t num_remote_objects = bhash_len(&ssync->remote_objects);
 		for (bhash_index_t i = 0; i < num_remote_objects; ++i) {
 			ssync_net_id_t id = ssync->remote_objects.keys[i];
@@ -567,6 +584,12 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 			obj_info->updated_at = prev_snapshot->timestamp;
 			obj_info->simulated_at = simulation_time_ms;
 
+			float interpolant = 0.f;
+			if (to_obj != NULL) {
+				interpolant =
+					  (float)(simulation_time_ms - from_obj->timestamp)
+					/ (float)(to_obj->timestamp - from_obj->timestamp);
+			}
 			ssync_ctx_t ctx = {
 				.mode = SSYNC_MODE_READ,
 				.ssync = ssync,
@@ -631,6 +654,7 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 			const ssync_obj_info_t* info = &ssync->local_objects.values[i];
 
 			ssync_reset_obj(&tmp_obj);
+			tmp_obj.timestamp = current_time_ms;
 
 			if (snapshot_ctx.has_space) {
 				ssync_ctx_t sync_ctx = {
@@ -644,7 +668,7 @@ ssync_update_initialized(ssync_t* ssync, double dt) {
 
 			ssync_add_outgoing_obj(
 				&snapshot_ctx,
-				info->created_at, info->flags,
+				info->flags,
 				id, &tmp_obj
 			);
 		}

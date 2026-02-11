@@ -30,6 +30,7 @@ ssync_host_realloc(void* ptr, size_t size, void* ctx);
 
 typedef SSYNC_PROP_GROUP_MASK_TYPE ssync_prop_group_mask_t;
 typedef SSYNC_PROP_MASK_TYPE ssync_prop_mask_t;
+typedef int64_t ssync_timestamp_offset_t;
 
 typedef enum {
 	SSYNC_RECORD_TYPE_END = 0,
@@ -60,20 +61,15 @@ typedef struct {
 typedef int64_t ssync_prop_t;
 
 typedef struct {
+	ssync_timestamp_t timestamp;
 	ssync_prop_group_mask_t prop_group_mask;
 	barray(ssync_prop_t) props;
 } ssync_obj_t;
 
 typedef struct {
 	ssync_net_id_t id;
-	ssync_timestamp_t timestamp;
-	ssync_obj_flags_t flags;
-} ssync_obj_create_record_t;
-
-typedef struct {
-	ssync_net_id_t id;
-	ssync_timestamp_t timestamp;
-} ssync_obj_destroy_record_t;
+	ssync_timestamp_offset_t timestamp_offset;
+} ssync_obj_header_t;
 
 typedef enum {
 	SSYNC_PROP_GROUP_OP_ADD = 0,
@@ -187,6 +183,7 @@ ssync_cleanup_obj(ssync_obj_t* obj, void* memctx) {
 
 static inline void
 ssync_copy_obj(ssync_obj_t* dst, const ssync_obj_t* src, void* memctx) {
+	dst->timestamp = src->timestamp;
 	dst->prop_group_mask = src->prop_group_mask;
 	size_t num_props = barray_len(src->props);
 	barray_resize(dst->props, num_props, memctx);
@@ -503,17 +500,9 @@ bsv_ssync_init_record(bsv_ctx_t* ctx, ssync_init_record_t* rec) {
 }
 
 static inline bsv_status_t
-bsv_ssync_obj_create_record(bsv_ctx_t* ctx, ssync_obj_create_record_t* rec) {
-	BSV_CHECK_STATUS(bsv_ssync_net_id(ctx, &rec->id));
-	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->timestamp));
-	BSV_CHECK_STATUS(bsv_auto(ctx, &rec->flags));  // Maybe shrink to bit size
-	return bsv_status(ctx);
-}
-
-static inline bsv_status_t
-bsv_ssync_obj_destroy_record(bsv_ctx_t* ctx, ssync_obj_destroy_record_t* rec) {
-	BSV_CHECK_STATUS(bsv_ssync_net_id(ctx, &rec->id));
-	BSV_CHECK_STATUS(bsv_ssync_timestamp(ctx, &rec->timestamp));
+bsv_ssync_obj_header(bsv_ctx_t* ctx, ssync_obj_header_t* hdr) {
+	BSV_CHECK_STATUS(bsv_ssync_net_id(ctx, &hdr->id));
+	BSV_CHECK_STATUS(bsv_sint(ctx, &hdr->timestamp_offset));
 	return bsv_status(ctx);
 }
 
@@ -714,6 +703,7 @@ ssync_write_obj_update(
 
 static inline void
 ssync_reset_obj(ssync_obj_t* obj) {
+	obj->timestamp = 0;
 	obj->prop_group_mask = 0;
 	barray_clear(obj->props);
 }
@@ -897,11 +887,11 @@ ssync_end_outgoing_snapshot(ssync_outgoing_snapshot_ctx_t* ctx) {
 			ssync_prepare_record_buf(&buf, ctx);
 
 			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_DESTROY);
-			ssync_obj_destroy_record_t record = {
+			ssync_obj_header_t hdr = {
 				.id = id,
-				.timestamp = ctx->current_time_ms,
+				.timestamp_offset = 0,
 			};
-			bsv_ssync_obj_destroy_record(&buf.bsv, &record);
+			bsv_ssync_obj_header(&buf.bsv, &hdr);
 
 			// Try appending to the packet
 			ctx->has_space &= bitstream_append(ctx->packet_stream, &buf.stream);
@@ -928,7 +918,6 @@ ssync_end_outgoing_snapshot(ssync_outgoing_snapshot_ctx_t* ctx) {
 static inline void
 ssync_add_outgoing_obj(
 	ssync_outgoing_snapshot_ctx_t* ctx,
-	ssync_timestamp_t created_at,
 	ssync_obj_flags_t flags,
 	ssync_net_id_t obj_id,
 	const ssync_obj_t* obj
@@ -943,12 +932,12 @@ ssync_add_outgoing_obj(
 			ssync_prepare_record_buf(&buf, ctx);
 
 			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_CREATE);
-			ssync_obj_create_record_t record = {
+			ssync_obj_header_t hdr = {
 				.id = obj_id,
-				.timestamp = created_at,
-				.flags = flags,
+				.timestamp_offset = (ssync_timestamp_offset_t)obj->timestamp - (ssync_timestamp_offset_t)ctx->current_time_ms,
 			};
-			bsv_ssync_obj_create_record(&buf.bsv, &record);
+			bsv_ssync_obj_header(&buf.bsv, &hdr);
+			ssync_write_bitmask(&buf.stream, flags, 3);
 			ssync_write_bitmask(
 				&buf.stream,
 				obj->prop_group_mask,
@@ -968,16 +957,17 @@ ssync_add_outgoing_obj(
 			bhash_put(&ctx->snapshot->objects, obj_id, copy);
 		}
 	} else {  // Existing obj
-		if (
-			ctx->has_space
-			&&
-			!ssync_obj_equal(config->schema, obj, base_obj)
-		) {
+		// TODO: Defer and deprioritize unchanged obj
+		if (ctx->has_space) {
 			ssync_record_ctx_t buf;
 			ssync_prepare_record_buf(&buf, ctx);
 
 			ssync_write_record_type(&buf.stream, SSYNC_RECORD_TYPE_OBJ_UPDATE);
-			bsv_ssync_net_id(&buf.bsv, &obj_id);
+			ssync_obj_header_t hdr = {
+				.id = obj_id,
+				.timestamp_offset = (ssync_timestamp_offset_t)obj->timestamp - (ssync_timestamp_offset_t)ctx->current_time_ms,
+			};
+			bsv_ssync_obj_header(&buf.bsv, &hdr);
 			ssync_write_obj_update(
 				&buf.bsv, &buf.stream,
 				config->schema, obj, base_obj
@@ -1086,25 +1076,31 @@ ssync_process_snapshot_info_record(ssync_incoming_packet_ctx_t* ctx) {
 static inline bool
 ssync_process_process_object_create_record(
 	ssync_incoming_packet_ctx_t* ctx,
-	ssync_obj_create_record_t* record_out,
+	ssync_obj_header_t* hdr_out,
+	ssync_obj_flags_t* flags_out,
 	const ssync_obj_t** data_out
 ) {
 	if (ctx->incoming_snapshot == NULL) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	ssync_obj_create_record_t record;
-	if (bsv_ssync_obj_create_record(ctx->packet_bsv, &record) != BSV_OK) {
+	ssync_obj_header_t hdr;
+	if (bsv_ssync_obj_header(ctx->packet_bsv, &hdr) != BSV_OK) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	bhash_alloc_result_t alloc_result = bhash_alloc(&ctx->incoming_snapshot->objects, record.id);
+	bhash_alloc_result_t alloc_result = bhash_alloc(&ctx->incoming_snapshot->objects, hdr.id);
 	if (!alloc_result.is_new) {  // Duplicated entry
 		return ssync_discard_incoming_packet(ctx);
 	}
 
+	uint32_t flags;
+	if (!ssync_read_bitmask(ctx->packet_stream, &flags, 3)) {
+		return ssync_discard_incoming_packet(ctx);
+	}
+
 	// Write a dummy entry first so there is no problem during cleanup
-	ctx->incoming_snapshot->objects.keys[alloc_result.index] = record.id;
+	ctx->incoming_snapshot->objects.keys[alloc_result.index] = hdr.id;
 	ctx->incoming_snapshot->objects.values[alloc_result.index] = (ssync_obj_t){ 0 };
 
 	ssync_endpoint_t* endpoint = ctx->endpoint;
@@ -1142,7 +1138,8 @@ ssync_process_process_object_create_record(
 
 	ctx->incoming_snapshot->objects.values[alloc_result.index] = obj;
 
-	if (record_out != NULL) { *record_out = record; }
+	if (hdr_out != NULL) { *hdr_out = hdr; }
+	if (flags_out != NULL) { *flags_out = flags; }
 	if (data_out != NULL) {
 		*data_out = &ctx->incoming_snapshot->objects.values[alloc_result.index];
 	}
@@ -1153,27 +1150,27 @@ ssync_process_process_object_create_record(
 static inline bool
 ssync_process_process_object_destroy_record(
 	ssync_incoming_packet_ctx_t* ctx,
-	ssync_obj_destroy_record_t* record_out
+	ssync_obj_header_t* hdr_out
 ) {
 	if (ctx->incoming_snapshot == NULL) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	ssync_obj_destroy_record_t record;
-	if (bsv_ssync_obj_destroy_record(ctx->packet_bsv, &record) != BSV_OK) {
+	ssync_obj_header_t hdr;
+	if (bsv_ssync_obj_header(ctx->packet_bsv, &hdr) != BSV_OK) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
 	ssync_endpoint_t* endpoint = ctx->endpoint;
 	const ssync_endpoint_config_t* config = endpoint->config;
 
-	bhash_index_t index = bhash_remove(&ctx->incoming_snapshot->objects, record.id);
+	bhash_index_t index = bhash_remove(&ctx->incoming_snapshot->objects, hdr.id);
 	if (!bhash_is_valid(index)) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 	ssync_cleanup_obj(&ctx->incoming_snapshot->objects.values[index], config->memctx);
 
-	if (record_out != NULL) { *record_out = record; }
+	if (hdr_out != NULL) { *hdr_out = hdr; }
 
 	return true;
 }
@@ -1188,8 +1185,8 @@ ssync_process_object_update_record(
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	ssync_net_id_t id;
-	if (bsv_ssync_net_id(ctx->packet_bsv, &id) != BSV_OK) {
+	ssync_obj_header_t hdr;
+	if (bsv_ssync_obj_header(ctx->packet_bsv, &hdr) != BSV_OK) {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
@@ -1202,12 +1199,12 @@ ssync_process_object_update_record(
 		&&
 		endpoint->last_acked_snapshot->remote != NULL
 	) {
-		base_obj = bhash_get_value(&endpoint->last_acked_snapshot->remote->objects, id);
+		base_obj = bhash_get_value(&endpoint->last_acked_snapshot->remote->objects, hdr.id);
 	} else {
 		return ssync_discard_incoming_packet(ctx);
 	}
 
-	ssync_obj_t* updated_obj = bhash_get_value(&ctx->incoming_snapshot->objects, id);
+	ssync_obj_t* updated_obj = bhash_get_value(&ctx->incoming_snapshot->objects, hdr.id);
 	if (
 		updated_obj == NULL
 		||
@@ -1220,8 +1217,9 @@ ssync_process_object_update_record(
 	) {
 		return ssync_discard_incoming_packet(ctx);
 	}
+	updated_obj->timestamp = (int64_t)ctx->incoming_snapshot->timestamp + hdr.timestamp_offset;
 
-	if (id_out != NULL) { *id_out = id; }
+	if (id_out != NULL) { *id_out = hdr.id; }
 	if (data_out != NULL) { *data_out = updated_obj; }
 
 	return true;

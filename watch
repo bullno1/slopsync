@@ -9,7 +9,9 @@ inotifywait -r -e CLOSE_WRITE -m include src tests | \
 	while read path action file
 	do
 		clear
-		./build $@ || true
-		bin/${BUILD_TYPE}/slopsync-tests || true
+		if ./build $@
+		then
+			bin/${BUILD_TYPE}/slopsync-tests || true
+		fi
 		echo "Done"
 	done

@@ -15,7 +15,6 @@ ssync_server_realloc(void* ptr, size_t size, void* ctx);
 #include "base64.h"
 
 typedef struct {
-	ssync_timestamp_t created_at;
 	ssync_obj_flags_t flags;
 	int authority;
 	ssync_obj_t data;
@@ -101,7 +100,7 @@ ssyncd_write_snapshot(
 
 		ssync_add_outgoing_obj(
 			&ctx,
-			info->created_at, info->flags,
+			info->flags,
 			id, &info->data
 		);
 	}
@@ -271,24 +270,24 @@ ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
 				}
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_CREATE: {
-				ssync_obj_create_record_t record;
+				ssync_obj_header_t hdr;
+				ssync_obj_flags_t flags;
 				const ssync_obj_t* obj;
-				if (!ssync_process_process_object_create_record(&ctx, &record, &obj)) {
+				if (!ssync_process_process_object_create_record(&ctx, &hdr, &flags, &obj)) {
 					goto end;
 				}
 
-				if (record.id.bin != player->obj_id_bin) {
+				if (hdr.id.bin != player->obj_id_bin) {
 					ssync_discard_incoming_packet(&ctx);
 					goto end;
 				}
 
-				bhash_alloc_result_t alloc_result = bhash_alloc(&ssyncd->objects, record.id);
+				bhash_alloc_result_t alloc_result = bhash_alloc(&ssyncd->objects, hdr.id);
 				if (alloc_result.is_new) {
-					ssyncd->objects.keys[alloc_result.index] = record.id;
+					ssyncd->objects.keys[alloc_result.index] = hdr.id;
 					ssyncd->objects.values[alloc_result.index] = (ssyncd_obj_info_t){
 						.authority = player_id,
-						.created_at = (ssync_timestamp_t)(ssyncd->current_time_s * 1000.0),
-						.flags = record.flags,
+						.flags = flags,
 					};
 					ssync_copy_obj(
 						&ssyncd->objects.values[alloc_result.index].data,
@@ -298,16 +297,16 @@ ssyncd_process_message(ssyncd_t* ssyncd, ssync_blob_t msg, int player_id) {
 				}
 			} break;
 			case SSYNC_RECORD_TYPE_OBJ_DESTROY: {
-				ssync_obj_destroy_record_t record;
-				if (!ssync_process_process_object_destroy_record(&ctx, &record)) {
+				ssync_obj_header_t hdr;
+				if (!ssync_process_process_object_destroy_record(&ctx, &hdr)) {
 					goto end;
 				}
 
-				ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, record.id);
+				ssyncd_obj_info_t* obj_info = bhash_get_value(&ssyncd->objects, hdr.id);
 				if (obj_info != NULL) {
 					if (obj_info->authority == player_id) {
 						ssync_cleanup_obj(&obj_info->data, ssyncd);
-						bhash_remove(&ssyncd->objects, record.id);
+						bhash_remove(&ssyncd->objects, hdr.id);
 					} else {
 						ssync_discard_incoming_packet(&ctx);
 						goto end;
