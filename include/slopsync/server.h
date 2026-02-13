@@ -37,6 +37,9 @@ ssyncd_t*
 ssyncd_init(const ssyncd_config_t* config);
 
 void
+ssyncd_reinit(ssyncd_t** ssyncd, const ssyncd_config_t* config);
+
+void
 ssyncd_cleanup(ssyncd_t* ssyncd);
 
 void

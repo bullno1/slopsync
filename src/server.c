@@ -160,6 +160,28 @@ ssyncd_init(const ssyncd_config_t* config) {
 }
 
 void
+ssyncd_reinit(ssyncd_t** ssyncd_ptr, const ssyncd_config_t* config) {
+	ssyncd_t* ssd = *ssyncd_ptr;
+	if (ssd == NULL) {
+		*ssyncd_ptr = ssyncd_init(config);
+	} else {
+		ssd->config = *config;
+
+		ssync_reinit_snapshot_pool(&ssd->snapshot_pool, ssd);
+
+		bhash_config_t hconfig = bhash_config_default();
+		hconfig.memctx = ssd;
+		bhash_init(&ssd->objects, hconfig);
+
+		for (int i = 0; i < config->max_num_players; ++i) {
+			if (ssd->players[i].username) {
+				ssync_reinit_endpoint(&ssd->players[i].endpoint, &ssd->endpoint_config);
+			}
+		}
+	}
+}
+
+void
 ssyncd_cleanup(ssyncd_t* ssyncd) {
 	for (int i = 0; i < ssyncd->config.max_num_players; ++i) {
 		if (ssyncd->players[i].username) {
